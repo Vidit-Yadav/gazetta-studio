@@ -6,7 +6,7 @@
     "dev": "tsx ../../../../packages/gazetta/src/cli/index.ts dev sites/main"
   },
   "devDependencies": {
-    "tsx": "^4.21.0",
+    "tsx": "^4.23.15",
     "zod": "^4.4.3",
     "gazetta": "*"
   }
