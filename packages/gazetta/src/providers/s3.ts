@@ -10,6 +10,7 @@ import {
 } from '@aws-sdk/client-s3'
 import { Upload } from '@aws-sdk/lib-storage'
 import type { Readable } from 'node:stream'
+import { Agent as HttpAgent } from 'node:http'
 import type { ByteRange, DirEntry, StorageProvider } from '../types.js'
 import { nodeReadableToWeb, webReadableToNode } from './_stream-interop.js'
 
@@ -31,6 +32,8 @@ export function createS3Provider(options: S3ProviderOptions): StorageProvider & 
       secretAccessKey: options.secretAccessKey,
     },
     forcePathStyle: options.forcePathStyle ?? true,
+    // EXPERIMENT ONLY (exp/minio-flake-probe): fresh connection per request.
+    ...(process.env.GAZETTA_S3_NO_KEEPALIVE ? { requestHandler: { httpAgent: new HttpAgent({ keepAlive: false }) } } : {}),
   })
   const bucket = options.bucket
 

@@ -1,0 +1,70 @@
+name: MinIO flake probe (experiment)
+
+# Throwaway experiment for the docker.test.ts MinIO flakes. Lives only on
+# the exp/minio-flake-probe branch; never merged.
+on:
+  push:
+    branches: [exp/minio-flake-probe]
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: A-baseline-full
+            runs: 8
+            cmd: npx vitest run
+          - variant: B-solo-docker
+            runs: 20
+            cmd: npx vitest run tests/docker.test.ts
+          - variant: C-no-keepalive-full
+            runs: 8
+            cmd: npx vitest run
+            no_keepalive: '1'
+          - variant: D-docker-after-rest
+            runs: 8
+            cmd: npx vitest run --exclude tests/docker.test.ts && npx vitest run tests/docker.test.ts
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build -w packages/gazetta
+      - name: Pre-pull images
+        run: |
+          docker pull mcr.microsoft.com/azure-storage/azurite:3.37.0
+          docker pull bitnamilegacy/minio:latest
+      - name: Probe
+        working-directory: apps/admin
+        env:
+          GAZETTA_S3_NO_KEEPALIVE: ${{ matrix.no_keepalive }}
+          RUNS: ${{ matrix.runs }}
+          CMD: ${{ matrix.cmd }}
+        run: |
+          set +e
+          pass=0; fail=0
+          : > "$RUNNER_TEMP/fails.txt"
+          for i in $(seq 1 "$RUNS"); do
+            out=$(bash -c "$CMD" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+            if echo "$out" | grep -qE "Tests +[0-9]+ failed|Test Files +[0-9]+ failed"; then
+              fail=$((fail + 1))
+              echo "--- run $i FAILED" >> "$RUNNER_TEMP/fails.txt"
+              echo "$out" | grep -E "^ FAIL .*>|ECONNRESET|socket hang up|timed out in|expected .* to be" | sort -u | head -8 >> "$RUNNER_TEMP/fails.txt"
+            else
+              pass=$((pass + 1))
+            fi
+            echo "run $i: pass=$pass fail=$fail"
+          done
+          {
+            echo "## ${{ matrix.variant }}: $fail failed / $RUNS runs"
+            echo '```'
+            cat "$RUNNER_TEMP/fails.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/fails.txt"
+          echo "RESULT ${{ matrix.variant }} fail=$fail runs=$RUNS"
