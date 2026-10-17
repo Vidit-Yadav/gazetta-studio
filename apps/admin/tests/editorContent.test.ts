@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useEditorContentStore, type EditingTarget } from '../src/client/stores/editorContent.js'
 
@@ -11,6 +11,12 @@ function makeTarget(overrides: Partial<EditingTarget> = {}): EditingTarget {
     save: async () => {},
     ...overrides,
   }
+}
+
+const CUSTOM_EDITOR_URL = 'data:text/javascript,' + encodeURIComponent('export default { mount() {}, unmount() {} }')
+
+function editorTarget(overrides: Partial<EditingTarget> = {}): EditingTarget {
+  return makeTarget({ hasEditor: true, editorUrl: CUSTOM_EDITOR_URL, ...overrides })
 }
 
 describe('editorContent', () => {
@@ -78,6 +84,93 @@ describe('editorContent', () => {
       await store.open(makeTarget())
       expect(store.fragmentLink).toBeNull()
       expect(store.loadError).toBeNull()
+    })
+
+    it('mounts the custom editor when the import is not invalidated', async () => {
+      const store = useEditorContentStore()
+      await store.open(editorTarget())
+      expect(store.customEditorMount).not.toBeNull()
+      expect(store.customEditorLoading).toBe(false)
+      expect(store.mountVersion).toBe(1)
+    })
+
+    it('keeps falling back to the default form when a non-invalidated import fails', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const store = useEditorContentStore()
+      await store.open(editorTarget({ editorUrl: 'data:text/javascript,throw new Error("boom")' }))
+      expect(store.customEditorMount).toBeNull()
+      expect(store.customEditorLoading).toBe(false)
+      expect(store.mountVersion).toBe(1)
+      expect(warn).toHaveBeenCalledOnce()
+      warn.mockRestore()
+    })
+  })
+
+  // A pending custom-editor import must not resurrect state for a target
+  // that is no longer open (#921): clear() / setLoadError() / showFragmentLink()
+  // advance the generation so the stale completion is discarded.
+  describe('stale custom-editor import invalidation', () => {
+    it('clear() discards a pending import', async () => {
+      const store = useEditorContentStore()
+      const pending = store.open(editorTarget())
+      expect(store.customEditorLoading).toBe(true)
+      const versionBefore = store.mountVersion
+
+      store.clear()
+      await pending
+
+      expect(store.customEditorMount).toBeNull()
+      expect(store.customEditorLoading).toBe(false)
+      expect(store.mountVersion).toBe(versionBefore)
+    })
+
+    it('setLoadError() discards a pending import', async () => {
+      const store = useEditorContentStore()
+      const pending = store.open(editorTarget())
+      expect(store.customEditorLoading).toBe(true)
+      const versionBefore = store.mountVersion
+
+      store.setLoadError('Template not found')
+      await pending
+
+      expect(store.customEditorMount).toBeNull()
+      expect(store.customEditorLoading).toBe(false)
+      expect(store.mountVersion).toBe(versionBefore)
+      expect(store.loadError).toBe('Template not found')
+    })
+
+    it('showFragmentLink() discards a pending import', async () => {
+      const store = useEditorContentStore()
+      const pending = store.open(editorTarget())
+      expect(store.customEditorLoading).toBe(true)
+      const versionBefore = store.mountVersion
+
+      store.showFragmentLink('footer')
+      await pending
+
+      expect(store.customEditorMount).toBeNull()
+      expect(store.customEditorLoading).toBe(false)
+      expect(store.mountVersion).toBe(versionBefore)
+      expect(store.fragmentLink).toBe('footer')
+    })
+
+    it('lets a newer open() complete after an older request was invalidated', async () => {
+      const store = useEditorContentStore()
+      const stale = store.open(editorTarget({ template: 'stale' }))
+      store.clear()
+      await store.open(makeTarget({ template: 'fresh' }))
+
+      expect(store.target?.template).toBe('fresh')
+      expect(store.customEditorMount).toBeNull()
+      expect(store.customEditorLoading).toBe(false)
+      expect(store.mountVersion).toBe(1)
+
+      await stale
+
+      expect(store.target?.template).toBe('fresh')
+      expect(store.customEditorMount).toBeNull()
+      expect(store.customEditorLoading).toBe(false)
+      expect(store.mountVersion).toBe(1)
     })
   })
 

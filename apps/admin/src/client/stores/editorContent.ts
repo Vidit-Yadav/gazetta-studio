@@ -35,7 +35,10 @@ export const useEditorContentStore = defineStore('editorContent', () => {
   /** True while a custom editor import is pending — nothing may mount until it settles. */
   const customEditorLoading = ref(false)
   const fragmentLink = ref<string | null>(null)
-  /** Generation counter — incremented on every open(). Used to discard stale async results. */
+  /**
+   * Generation counter — incremented on every open() and on clear() / setLoadError() /
+   * showFragmentLink(), so a custom-editor import whose target is gone is discarded.
+   */
   let openGeneration = 0
 
   const template = computed(() => target.value?.template ?? null)
@@ -66,7 +69,7 @@ export const useEditorContentStore = defineStore('editorContent', () => {
     if (t.hasEditor && t.editorUrl) {
       try {
         const mod = await import(/* @vite-ignore */ t.editorUrl)
-        // Discard if a newer open() started while the import was pending
+        // Discard if a newer open() started, or the target was cleared, while the import was pending
         if (gen !== openGeneration) return
         customEditorMount.value = (mod.default ?? mod) as EditorMount
       } catch (err) {
@@ -99,20 +102,27 @@ export const useEditorContentStore = defineStore('editorContent', () => {
   }
 
   function setLoadError(message: string) {
+    openGeneration++
     target.value = null
     loadError.value = message
+    customEditorMount.value = null
+    customEditorLoading.value = false
   }
 
   function showFragmentLink(nameOrPath: string) {
+    openGeneration++
     loadError.value = null
     target.value = null
     content.value = null
     saved.value = null
     savedJson.value = ''
     fragmentLink.value = nameOrPath.startsWith('@') ? nameOrPath.split('/')[0].slice(1) : nameOrPath
+    customEditorMount.value = null
+    customEditorLoading.value = false
   }
 
   function clear() {
+    openGeneration++
     loadError.value = null
     fragmentLink.value = null
 
@@ -120,6 +130,8 @@ export const useEditorContentStore = defineStore('editorContent', () => {
     content.value = null
     saved.value = null
     savedJson.value = ''
+    customEditorMount.value = null
+    customEditorLoading.value = false
   }
 
   return {
