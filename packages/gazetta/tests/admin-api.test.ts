@@ -475,6 +475,48 @@ describe('GET /preview/* for archived pages (#971)', () => {
   })
 })
 
+describe('GET /preview/@fragment for archived fragments (#1001)', () => {
+  it('shows an alias placeholder for an archived fragment instead of a template error', async () => {
+    const created = await app.request('/api/fragments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'archived-frag-alias-1001', template: 'footer-layout' }),
+    })
+    expect(created.status).toBe(200)
+    const archived = await app.request('/api/fragments/archived-frag-alias-1001/archive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ aliasOf: 'header' }),
+    })
+    expect(archived.status).toBe(200)
+    expect(((await archived.json()) as { aliasOf?: string }).aliasOf).toBe('header')
+
+    const { status, body } = await getText('/preview/@archived-frag-alias-1001')
+    expect(status).toBe(200)
+    expect(body).not.toContain('Template Error')
+    // Fragments are aliased by name, not by route: the placeholder must
+    // name @header and must not manufacture a page link for it.
+    expect(body).toContain('@header')
+    expect(body).not.toMatch(/href="[^"]*header/)
+  })
+
+  it('shows a gone placeholder for an archived fragment without an alias', async () => {
+    const created = await app.request('/api/fragments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'archived-frag-gone-1001', template: 'footer-layout' }),
+    })
+    expect(created.status).toBe(200)
+    const archived = await app.request('/api/fragments/archived-frag-gone-1001/archive', { method: 'POST' })
+    expect(archived.status).toBe(200)
+
+    const { status, body } = await getText('/preview/@archived-frag-gone-1001')
+    expect(status).toBe(200)
+    expect(body).not.toContain('Template Error')
+    expect(body).toContain('410 Gone')
+  })
+})
+
 describe('GET /preview/@fragment', () => {
   it('renders fragment standalone', async () => {
     const { status, body } = await getText('/preview/@header')

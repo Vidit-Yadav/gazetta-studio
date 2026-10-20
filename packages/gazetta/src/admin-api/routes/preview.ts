@@ -71,6 +71,13 @@ async function renderPreview(c: Context, source: SourceContext, overrides: Draft
   }
   if (fragRequestPath.startsWith('/@')) {
     const fragmentName = fragRequestPath.slice(2)
+    // Archived fragments have no template to render (or must not render it):
+    // show what references resolve to instead — the alias in @name form, or
+    // 410 Gone. Fragments have no route, so the placeholder has no page link.
+    const fragment = site.fragments.get(fragmentName)
+    if (fragment && isArchived(fragment)) {
+      return c.html(archivePlaceholder(site, fragment.aliasOf, 'fragment'))
+    }
     try {
       const previewSite = withStructuralOverride(site, { kind: 'fragment', name: fragmentName }, overrides)
       const resolved = await resolveFragment(fragmentName, previewSite, previewLocale)
@@ -127,14 +134,27 @@ function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
-function archivePlaceholder(site: Site, aliasOf: string | undefined): string {
+function archivePlaceholder(site: Site, aliasOf: string | undefined, kind: 'page' | 'fragment' = 'page'): string {
   const open = '<!doctype html><html><body style="font-family:system-ui;padding:2rem;color:#525252">'
   const close = '</body></html>'
   if (!aliasOf) {
+    const detail =
+      kind === 'fragment'
+        ? 'This fragment is archived. References to it cannot resolve.'
+        : 'This page is archived. Visitors get a "Gone" response.'
     return (
       open +
       '<h2 style="margin:0 0 0.5rem">410 Gone</h2>' +
-      '<p style="margin:0;font-size:0.875rem">This page is archived. Visitors get a "Gone" response.</p>' +
+      `<p style="margin:0;font-size:0.875rem">${detail}</p>` +
+      close
+    )
+  }
+  if (kind === 'fragment') {
+    const alias = escapeHtml(`@${aliasOf}`)
+    return (
+      open +
+      `<h2 style="margin:0 0 0.5rem">301 → ${alias}</h2>` +
+      `<p style="margin:0;font-size:0.875rem">References to this fragment resolve to ${alias}.</p>` +
       close
     )
   }
