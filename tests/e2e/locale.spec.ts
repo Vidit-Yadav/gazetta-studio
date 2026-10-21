@@ -22,6 +22,7 @@ test.describe('Locale picker', () => {
 
   test('click FR activates it and adds ?locale=fr to URL', async ({ page }) => {
     await page.goto('/admin/pages/home')
+    await expect(page.locator('[data-testid="preview-iframe"]')).toBeVisible()
     await page.click('[data-testid="locale-fr"]')
     await expect(page.locator('[data-testid="locale-fr"]')).toHaveClass(/active/)
     await expect(page.locator('[data-testid="locale-en"]')).not.toHaveClass(/active/)
@@ -35,6 +36,7 @@ test.describe('Locale picker', () => {
 
   test('click EN removes ?locale from URL', async ({ page }) => {
     await page.goto('/admin/pages/home?locale=fr')
+    await expect(page.locator('[data-testid="preview-iframe"]')).toBeVisible()
     await page.click('[data-testid="locale-en"]')
     await expect(page.locator('[data-testid="locale-en"]')).toHaveClass(/active/)
     // Same pushState concern as above — assert the URL via
