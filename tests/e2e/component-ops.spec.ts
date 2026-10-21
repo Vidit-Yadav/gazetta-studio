@@ -373,8 +373,21 @@ test.describe('Component operations', () => {
     await handle.focus()
     await expect(handle).toBeFocused()
     await page.keyboard.press('Space')
+
+    // The lifted row shows where it would land; ArrowUp moves that marker.
+    const indicator = page.locator('[data-testid="keyboard-insertion-indicator"]')
+    await expect(indicator).toBeVisible()
+    expect(await indicator.getAttribute('data-boundary')).toBe(`${bannerBefore}`)
+    expect(await indicator.evaluate(el => el.nextElementSibling?.getAttribute('data-component-name'))).toBe('banner')
+
     await page.keyboard.press('ArrowUp')
+    await expect(indicator).toHaveAttribute('data-boundary', `${bannerBefore - 1}`)
+    expect(await indicator.evaluate(el => el.nextElementSibling?.getAttribute('data-component-name'))).toBe(
+      before[bannerBefore - 1],
+    )
+
     await page.keyboard.press('Space')
+    await expect(indicator).toHaveCount(0)
 
     await expect
       .poll(async () => {

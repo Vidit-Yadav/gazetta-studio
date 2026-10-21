@@ -546,36 +546,123 @@ describe('ComponentTree — drag handle + Alt+arrow reorder (#105)', () => {
     expect(moveSpy).not.toHaveBeenCalled()
   })
 
-  it('resolves a move against the visible rows while a save clears pending before reload', async () => {
-    const hero = { name: 'hero', template: 'hero' }
-    const features = { name: 'features', template: 'features-grid' }
-    setPageSelection({
-      name: 'home',
-      route: '/',
-      template: 'page-default',
-      dir: 'pages/home',
-      components: [hero, features],
-    })
+  it('Space lift shows an insertion line and the arrow keys move it', async () => {
+    selectStarterHome()
     const w = mountTree(fakeFragmentsApi())
     await flushMicrotasks()
+    const handle = w.find('[data-testid="drag-handle-hero"]')
 
-    const structural = useEditorStructuralStore()
-    const key = { kind: 'page' as const, name: 'home' }
-    structural.moveComponent(key, [hero, features], 1, 0)
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(false)
+    await handle.trigger('keydown', { key: ' ' })
+    // Lifted at index 0 without moving: line above the source row.
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('0')
+
+    // Down across features (index 1): the row lands below it.
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('2')
+
+    // Down again to the last index: line after the last row.
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('3')
+    const list = w.find('[data-testid="component-tree-draggable"]')
+    expect(list.element.lastElementChild?.getAttribute('data-testid')).toBe('keyboard-insertion-indicator')
+
+    // Up one: back above the last row.
+    await handle.trigger('keydown', { key: 'ArrowUp' })
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('2')
+  })
+
+  it('the insertion line handles the first and last rows without moving past them', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
     await flushMicrotasks()
-    const blocks = w.findAll('.top-level-block')
-    expect(blocks).toHaveLength(2)
+    const lastHandle = w.find('[data-testid="drag-handle-banner"]')
 
+    await lastHandle.trigger('keydown', { key: ' ' })
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('2')
+
+    // Already last: ArrowDown is bounded.
+    await lastHandle.trigger('keydown', { key: 'ArrowDown' })
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('2')
+
+    await lastHandle.trigger('keydown', { key: 'ArrowUp' })
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('1')
+
+    // Top: the line sits above the first row and ArrowUp is bounded.
+    await lastHandle.trigger('keydown', { key: 'ArrowUp' })
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('0')
+    await lastHandle.trigger('keydown', { key: 'ArrowUp' })
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('0')
+    const list = w.find('[data-testid="component-tree-draggable"]')
+    expect(list.element.firstElementChild?.getAttribute('data-testid')).toBe('keyboard-insertion-indicator')
+  })
+
+  it('Space drop clears the insertion line and moves to the indicated index', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
     const editing = useEditingStore()
     const moveSpy = vi.spyOn(editing, 'moveComponentStructural')
-    structural.markWritten(structural.allEntries())
-    await blocks[1].trigger('keydown', { key: 'ArrowUp', altKey: true })
+    const handle = w.find('[data-testid="drag-handle-hero"]')
 
+    await handle.trigger('keydown', { key: ' ' })
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(true)
+
+    await handle.trigger('keydown', { key: ' ' })
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(false)
     expect(moveSpy).toHaveBeenCalledTimes(1)
     const args = moveSpy.mock.calls[0]
-    expect(args[1]).toEqual([features, hero])
+    expect(args[2]).toBe(0)
+    expect(args[3]).toBe(1)
+  })
+
+  it('Escape cancels the lift and clears the insertion line', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    const editing = useEditingStore()
+    const moveSpy = vi.spyOn(editing, 'moveComponentStructural')
+    const handle = w.find('[data-testid="drag-handle-hero"]')
+
+    await handle.trigger('keydown', { key: ' ' })
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(true)
+
+    await handle.trigger('keydown', { key: 'Escape' })
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(false)
+    expect(moveSpy).not.toHaveBeenCalled()
+  })
+
+  it('starting a pointer drag clears the keyboard insertion line', async () => {
+    dragAndDropMock.mockClear()
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    const handle = w.find('[data-testid="drag-handle-hero"]')
+
+    await handle.trigger('keydown', { key: ' ' })
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(true)
+
+    const dragOptions = dragAndDropMock.mock.calls[0][0] as { onDragstart: (data: unknown) => void }
+    dragOptions.onDragstart({ position: 0, state: {} })
+    await w.vm.$nextTick()
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(false)
+  })
+
+  it('removes the top-level component at the clicked index', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    const editing = useEditingStore()
+    const removeSpy = vi.spyOn(editing, 'removeComponentStructural')
+
+    await w.find('[data-testid="remove-features"]').trigger('click')
+
+    expect(removeSpy).toHaveBeenCalledTimes(1)
+    const args = removeSpy.mock.calls[0]
+    expect(args[0]).toEqual({ kind: 'page', name: 'home' })
     expect(args[2]).toBe(1)
-    expect(args[3]).toBe(0)
   })
 
   it('rebinds drag listeners when an emptied tree is repopulated', async () => {

@@ -76,7 +76,7 @@ The grip handle subsumes both. Trash button stays (delete is a different action;
 
 ### Q4 — Drop indicator: thin insertion line
 
-A 2px colored line renders between rows during drag, indicating exactly where the dropped item will land. Color: matches `--color-primary` (PrimeVue Aura emerald in our tokens).
+A 2px colored line renders between rows during drag and while a row is lifted by keyboard, indicating exactly where the dropped item will land. Color: matches `--color-primary` (PrimeVue Aura emerald in our tokens). The keyboard line maps the final array index back to a boundary in the still-rendered order: moving down draws it after the row currently at the destination index, moving up draws it before that row.
 
 **Rejected alternatives:**
 - **Reflow / placeholder gap** — ambiguous in nested trees (when hovering near a parent's last child, does the gap mean "after this child" or "after this parent"?). An insertion line at a specific Y-coordinate disambiguates.
@@ -154,7 +154,7 @@ Visual budget: 5 elements (down from 6).
 
 - Drag handle is a `<button>` (focusable; tab-stop)
 - Pressing `Space` on the handle "lifts" the row
-- After lift, ArrowUp / ArrowDown moves the proposed insertion position; the dragged row keeps focus and visual lift styling (live-region announcements are a follow-up)
+- After lift, ArrowUp / ArrowDown moves the thin insertion line from Q4 to the proposed landing slot; the dragged row keeps focus and visual lift styling (live-region announcements are a follow-up)
 - Pressing `Space` again drops; row stays focused at the new position
 - Pressing `Esc` cancels the lift (row returns to original position)
 

@@ -55,6 +55,7 @@ const toast = useToastStore()
 const focus = useComponentFocusStore()
 const structural = useEditorStructuralStore()
 const selectedNodeKey = ref<string | null>(null)
+const keyboardLift = ref<{ from: number; to: number } | null>(null)
 const hoveredNodeKey = ref<string | null>(null)
 const componentNodes = ref<ComponentNode[]>([])
 const showAddDialog = ref(false)
@@ -147,6 +148,8 @@ async function buildComponentNode(
 watch(
   [detail, effectiveComponents],
   async ([d, comps]) => {
+    // A rebuilt tree invalidates the index-based keyboard lift.
+    keyboardLift.value = null
     if (!d) {
       componentNodes.value = []
       gzMap.value = new Map()
@@ -396,6 +399,7 @@ function nodeToSelection(node: ComponentNode): EditorSelection | null {
 
 async function onSelect(node: ComponentNode) {
   if (!node.data) return
+  keyboardLift.value = null
   selectedNodeKey.value = node.key
   focus.clearPending()
   const treePath = node.data.treePath
@@ -491,26 +495,10 @@ function currentManifestKey(): import('gazetta/types').ManifestKey | null {
 function moveComponentTo(index: number, toIndex: number) {
   const comps = effectiveComponents.value
   if (!comps) return
-  if (toIndex < 0 || toIndex >= comps.length || index === toIndex) return
-  // During the gap between markWritten() and selection.reload(), the tree can
-  // still render the saved pending order while `effectiveComponents` already
-  // points at the pre-save disk order. Resolve the move against the rendered
-  // rows so the captured index targets the entry the author sees.
-  const domNames = [...(dragParentRef.value?.querySelectorAll<HTMLElement>(':scope > .top-level-block') ?? [])].map(
-    el => el.dataset.componentName ?? '',
-  )
-  const remaining = [...comps]
-  const visible = domNames.map(name => {
-    const at = remaining.findIndex(entry => (typeof entry === 'string' ? entry : entry.name) === name)
-    return at === -1 ? undefined : remaining.splice(at, 1)[0]
-  })
-  const current =
-    domNames.length === comps.length && visible.every(entry => entry !== undefined)
-      ? (visible as import('../api/client.js').ComponentEntry[])
-      : comps
+  if (index < 0 || index >= comps.length || toIndex < 0 || toIndex >= comps.length || index === toIndex) return
   const key = currentManifestKey()
   if (!key) return
-  editing.moveComponentStructural(key, current, index, toIndex)
+  editing.moveComponentStructural(key, comps, index, toIndex)
 }
 
 function moveComponent(index: number, direction: -1 | 1) {
@@ -539,7 +527,18 @@ function moveComponent(index: number, direction: -1 | 1) {
 const dragParentRef = ref<HTMLElement | null>(null)
 const dragValues = ref<import('../api/client.js').ComponentEntry[]>([])
 const dragSourceIndex = ref<number | null>(null)
-const keyboardLift = ref<{ from: number; to: number } | null>(null)
+/**
+ * Boundary in the rendered list where a lifted row will land: 0 is above the
+ * first row, `topLevelNodes.length` is below the last. `keyboardLift.to` is
+ * the final array index after the source is spliced out, so a downward move
+ * lands after the row currently at `to`, and an upward move before it.
+ */
+const keyboardInsertionBoundary = computed<number | null>(() => {
+  const lift = keyboardLift.value
+  if (!lift) return null
+  if (lift.to === lift.from) return lift.from
+  return lift.to < lift.from ? lift.to : lift.to + 1
+})
 
 watch(
   effectiveComponents,
@@ -603,6 +602,7 @@ function setupDrag(el: HTMLElement | null) {
       state.pointerDown.node.el.draggable = false
     },
     onDragstart: data => {
+      keyboardLift.value = null
       dragSourceIndex.value = data.position
       synthDrag = 'clonedDraggedNode' in data.state
       dragDropped = false
@@ -738,9 +738,7 @@ watch(
   { flush: 'post' },
 )
 
-const pendingRemove = ref<{ key: NonNullable<ReturnType<typeof currentManifestKey>>; indices: number[] } | null>(null)
-
-function removeComponentAt(index: number) {
+function removeComponent(index: number) {
   const comps = effectiveComponents.value
   if (!comps) return
   const key = currentManifestKey()
@@ -758,41 +756,6 @@ function removeComponentAt(index: number) {
   editing.removeComponentStructural(key, comps, index)
   toast.show(`Removed "${removedName}"`)
 }
-
-function removeComponent(index: number) {
-  const comps = effectiveComponents.value
-  const key = currentManifestKey()
-  if (!comps || !key) return
-  if (comps[index]) {
-    removeComponentAt(index)
-    return
-  }
-  // A post-save reload can briefly expose the pre-save detail array while
-  // the DOM still shows the saved rows. Defer the click until the new
-  // array lands instead of indexing past the end.
-  if (!pendingRemove.value || pendingRemove.value.key.kind !== key.kind || pendingRemove.value.key.name !== key.name) {
-    pendingRemove.value = { key, indices: [] }
-  }
-  if (!pendingRemove.value.indices.includes(index)) pendingRemove.value.indices.push(index)
-}
-
-watch(
-  effectiveComponents,
-  comps => {
-    const pending = pendingRemove.value
-    if (!pending || !comps) return
-    const key = currentManifestKey()
-    if (!key || key.kind !== pending.key.kind || key.name !== pending.key.name) {
-      pendingRemove.value = null
-      return
-    }
-    const indices = pending.indices.filter(index => !!comps[index]).sort((a, b) => b - a)
-    if (indices.length === 0) return
-    pendingRemove.value = null
-    for (const index of indices) removeComponentAt(index)
-  },
-  { flush: 'post' },
-)
 
 function addComponent(name: string, template: string) {
   const comps = effectiveComponents.value
@@ -905,70 +868,81 @@ function nextDuplicateName(
          only at v1; nested rows render as static (non-draggable) inside
          the block. -->
     <div v-if="topLevelNodes.length" ref="dragParentRef" class="top-level-list" data-testid="component-tree-draggable">
-      <div v-for="(topNode, topIndex) in topLevelNodes"
-        :key="topNode.key"
-        :data-component-name="topNode.label"
-        :class="['top-level-block', { 'keyboard-lifted': keyboardLift?.from === topIndex }]"
-        @keydown="onTopLevelKeydown($event, topIndex)">
-        <!-- The top-level row itself — draggable via the grip handle. -->
+      <template v-for="(topNode, topIndex) in topLevelNodes" :key="topNode.key">
+        <!-- Keyboard lift destination. The line sits at the boundary where
+             the lifted row will land if Space drops it now. -->
+        <div v-if="keyboardInsertionBoundary === topIndex"
+          class="keyboard-insertion-line"
+          data-testid="keyboard-insertion-indicator"
+          :data-boundary="topIndex" />
         <div
-          :class="['node-item', 'top-level-row', { selected: selectedNodeKey === topNode.key, hovered: hoveredNodeKey === topNode.key }]"
-          :data-testid="`component-${topNode.data?.isFragment ? topNode.data.fragName : topNode.label}`"
-          @click="onSelect(topNode)"
-          @mouseenter="onHover(topNode)"
-          @mouseleave="onHoverEnd()">
-          <button
-            type="button"
-            class="drag-handle"
-            :data-testid="`drag-handle-${topNode.label}`"
-            :aria-label="`Drag ${topNode.label} to reorder, or press Space then Arrow Up/Down, then Space again. Alt+Arrow moves immediately.`"
-            :title="`Drag to reorder, or press Space + Arrow Up/Down + Space`"
-            tabindex="0"
-            @click.stop>
-            <i class="pi pi-bars" aria-hidden="true" />
-          </button>
-          <i v-if="topNode.data?.error" class="pi pi-exclamation-triangle node-icon node-error-icon"
-            :title="topNode.data.error" />
-          <i v-else :class="nodeIcon(topNode, 0)" class="node-icon" />
-          <span v-if="topNode.data?.path && (editing.hasPendingEdit(topNode.data.path) || (editing.dirty && editing.path === topNode.data.path))" class="node-dirty-dot" />
-          <span class="node-label">{{ topNode.label }}</span>
-          <Button v-if="topNode.data?.path && (editing.hasPendingEdit(topNode.data.path) || (editing.dirty && editing.path === topNode.data.path))"
-            icon="pi pi-undo" text rounded size="small" class="node-revert"
-            title="Discard changes" @click.stop="revertComponent(topNode.data.path!)" />
-          <span class="node-actions">
-            <Button icon="pi pi-clone" text rounded size="small"
-              :data-testid="`duplicate-${topNode.label}`"
-              :aria-label="`Duplicate ${topNode.label}`"
-              :title="`Duplicate (Cmd/Ctrl+D)`"
-              @click.stop="duplicateComponent(topIndex)" />
-            <Button icon="pi pi-trash" text rounded size="small" severity="danger"
-              :data-testid="`remove-${topNode.label}`"
-              :aria-label="`Remove ${topNode.label}`"
-              @click.stop="removeComponent(topIndex)" />
-          </span>
-        </div>
+          :data-component-name="topNode.label"
+          :class="['top-level-block', { 'keyboard-lifted': keyboardLift?.from === topIndex }]"
+          @keydown="onTopLevelKeydown($event, topIndex)">
+          <!-- The top-level row itself — draggable via the grip handle. -->
+          <div
+            :class="['node-item', 'top-level-row', { selected: selectedNodeKey === topNode.key, hovered: hoveredNodeKey === topNode.key }]"
+            :data-testid="`component-${topNode.data?.isFragment ? topNode.data.fragName : topNode.label}`"
+            @click="onSelect(topNode)"
+            @mouseenter="onHover(topNode)"
+            @mouseleave="onHoverEnd()">
+            <button
+              type="button"
+              class="drag-handle"
+              :data-testid="`drag-handle-${topNode.label}`"
+              :aria-label="`Drag ${topNode.label} to reorder, or press Space then Arrow Up/Down, then Space again. Alt+Arrow moves immediately.`"
+              :title="`Drag to reorder, or press Space + Arrow Up/Down + Space`"
+              tabindex="0"
+              @click.stop>
+              <i class="pi pi-bars" aria-hidden="true" />
+            </button>
+            <i v-if="topNode.data?.error" class="pi pi-exclamation-triangle node-icon node-error-icon"
+              :title="topNode.data.error" />
+            <i v-else :class="nodeIcon(topNode, 0)" class="node-icon" />
+            <span v-if="topNode.data?.path && (editing.hasPendingEdit(topNode.data.path) || (editing.dirty && editing.path === topNode.data.path))" class="node-dirty-dot" />
+            <span class="node-label">{{ topNode.label }}</span>
+            <Button v-if="topNode.data?.path && (editing.hasPendingEdit(topNode.data.path) || (editing.dirty && editing.path === topNode.data.path))"
+              icon="pi pi-undo" text rounded size="small" class="node-revert"
+              title="Discard changes" @click.stop="revertComponent(topNode.data.path!)" />
+            <span class="node-actions">
+              <Button icon="pi pi-clone" text rounded size="small"
+                :data-testid="`duplicate-${topNode.label}`"
+                :aria-label="`Duplicate ${topNode.label}`"
+                :title="`Duplicate (Cmd/Ctrl+D)`"
+                @click.stop="duplicateComponent(topIndex)" />
+              <Button icon="pi pi-trash" text rounded size="small" severity="danger"
+                :data-testid="`remove-${topNode.label}`"
+                :aria-label="`Remove ${topNode.label}`"
+                @click.stop="removeComponent(topIndex)" />
+            </span>
+          </div>
 
-        <!-- Nested rows belonging to this top-level block. Rendered
-             inside the block so they ride along on drag. Not
-             individually draggable (no drag-handle). -->
-        <div v-for="{ node: nestedNode, depth } in flattenNested(topNode)"
-          :key="nestedNode.key"
-          :class="['node-item', 'nested-row', { selected: selectedNodeKey === nestedNode.key, hovered: hoveredNodeKey === nestedNode.key }]"
-          :style="nodeStyle(depth)"
-          :data-testid="`component-${nestedNode.data?.isFragment ? nestedNode.data.fragName : nestedNode.label}`"
-          @click="onSelect(nestedNode)"
-          @mouseenter="onHover(nestedNode)"
-          @mouseleave="onHoverEnd()">
-          <i v-if="nestedNode.data?.error" class="pi pi-exclamation-triangle node-icon node-error-icon"
-            :title="nestedNode.data.error" />
-          <i v-else :class="nodeIcon(nestedNode, depth)" class="node-icon" />
-          <span v-if="nestedNode.data?.path && (editing.hasPendingEdit(nestedNode.data.path) || (editing.dirty && editing.path === nestedNode.data.path))" class="node-dirty-dot" />
-          <span class="node-label">{{ nestedNode.label }}</span>
-          <Button v-if="nestedNode.data?.path && (editing.hasPendingEdit(nestedNode.data.path) || (editing.dirty && editing.path === nestedNode.data.path))"
-            icon="pi pi-undo" text rounded size="small" class="node-revert"
-            title="Discard changes" @click.stop="revertComponent(nestedNode.data.path!)" />
+          <!-- Nested rows belonging to this top-level block. Rendered
+               inside the block so they ride along on drag. Not
+               individually draggable (no drag-handle). -->
+          <div v-for="{ node: nestedNode, depth } in flattenNested(topNode)"
+            :key="nestedNode.key"
+            :class="['node-item', 'nested-row', { selected: selectedNodeKey === nestedNode.key, hovered: hoveredNodeKey === nestedNode.key }]"
+            :style="nodeStyle(depth)"
+            :data-testid="`component-${nestedNode.data?.isFragment ? nestedNode.data.fragName : nestedNode.label}`"
+            @click="onSelect(nestedNode)"
+            @mouseenter="onHover(nestedNode)"
+            @mouseleave="onHoverEnd()">
+            <i v-if="nestedNode.data?.error" class="pi pi-exclamation-triangle node-icon node-error-icon"
+              :title="nestedNode.data.error" />
+            <i v-else :class="nodeIcon(nestedNode, depth)" class="node-icon" />
+            <span v-if="nestedNode.data?.path && (editing.hasPendingEdit(nestedNode.data.path) || (editing.dirty && editing.path === nestedNode.data.path))" class="node-dirty-dot" />
+            <span class="node-label">{{ nestedNode.label }}</span>
+            <Button v-if="nestedNode.data?.path && (editing.hasPendingEdit(nestedNode.data.path) || (editing.dirty && editing.path === nestedNode.data.path))"
+              icon="pi pi-undo" text rounded size="small" class="node-revert"
+              title="Discard changes" @click.stop="revertComponent(nestedNode.data.path!)" />
+          </div>
         </div>
-      </div>
+      </template>
+      <div v-if="keyboardInsertionBoundary === topLevelNodes.length"
+        class="keyboard-insertion-line"
+        data-testid="keyboard-insertion-indicator"
+        :data-boundary="topLevelNodes.length" />
     </div>
     <p v-else class="empty">No components</p>
 
@@ -1011,6 +985,18 @@ function nextDuplicateName(
   background: var(--color-hover-bg);
   outline: 1px dashed var(--p-violet-400);
   outline-offset: -1px;
+}
+/* Keyboard lift destination. Negative vertical margins keep the line from
+   shifting rows as it moves between boundaries. */
+.keyboard-insertion-line {
+  position: relative;
+  z-index: 1;
+  height: 2px;
+  margin: -1px 2px;
+  background: var(--color-primary);
+  border-radius: 1px;
+  flex-shrink: 0;
+  pointer-events: none;
 }
 .drag-handle {
   display: flex;
