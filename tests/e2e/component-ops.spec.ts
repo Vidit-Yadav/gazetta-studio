@@ -1,8 +1,15 @@
+import type { Page } from '@playwright/test'
 import { test, expect } from './fixtures'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openEditor } from './helpers'
 import { ComponentTreePom } from './pages/ComponentTree'
+
+function topLevelNames(page: Page): Promise<string[]> {
+  return page
+    .locator('[data-testid="component-tree-draggable"] > .top-level-block')
+    .evaluateAll(blocks => blocks.map(block => block.getAttribute('data-component-name') ?? ''))
+}
 
 test.describe('Component operations', () => {
   // These tests mutate page.json on disk via the API. Isolation comes from the
@@ -262,5 +269,67 @@ test.describe('Component operations', () => {
     await page.keyboard.press('Alt+ArrowUp')
     await page.click('[data-testid="save-btn"]')
     await expect(page.locator('[data-testid="save-btn"]')).toBeDisabled({ timeout: 10000 })
+  })
+
+  test('dragging a top-level component by its grip reorders the tree', async ({ page }) => {
+    await openEditor(page, 'home')
+    const tree = new ComponentTreePom(page)
+    const saveBtn = page.locator('[data-testid="save-btn"]')
+    await expect(tree.row('hero')).toBeVisible({ timeout: 10000 })
+
+    const before = await topLevelNames(page)
+    expect(before.indexOf('banner')).toBeGreaterThan(before.indexOf('hero'))
+    await expect(saveBtn).toBeDisabled()
+
+    const handle = page.locator('[data-testid="drag-handle-banner"]')
+    const target = tree.row('hero')
+    const from = (await handle.boundingBox())!
+    const to = (await target.boundingBox())!
+
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2 - 10, { steps: 5 })
+    await page.mouse.move(to.x + to.width / 2, to.y + 2, { steps: 20 })
+    await page.mouse.up()
+
+    await expect
+      .poll(async () => {
+        const names = await topLevelNames(page)
+        return names.indexOf('banner') - names.indexOf('hero')
+      })
+      .toBe(-1)
+    await expect(saveBtn).toBeEnabled()
+    // The reorder stays pending; this test doesn't save, so the shared
+    // on-disk fixture is untouched and the next test starts clean.
+  })
+
+  test('Space lift, arrow, Space drop reorders a top-level component', async ({ page }) => {
+    await openEditor(page, 'home')
+    const tree = new ComponentTreePom(page)
+    const saveBtn = page.locator('[data-testid="save-btn"]')
+    await expect(tree.row('hero')).toBeVisible({ timeout: 10000 })
+
+    const before = await topLevelNames(page)
+    const bannerBefore = before.indexOf('banner')
+    expect(bannerBefore).toBeGreaterThan(0)
+    await expect(saveBtn).toBeDisabled()
+
+    const handle = page.locator('[data-testid="drag-handle-banner"]')
+    await handle.focus()
+    await expect(handle).toBeFocused()
+    await page.keyboard.press('Space')
+    await page.keyboard.press('ArrowUp')
+    await page.keyboard.press('Space')
+
+    await expect
+      .poll(async () => {
+        const names = await topLevelNames(page)
+        return names.indexOf('banner')
+      })
+      .toBe(bannerBefore - 1)
+    await expect(saveBtn).toBeEnabled()
+    await expect(handle).toBeFocused()
+    // Pending only; leaving the on-disk fixture untouched keeps the
+    // next test's baseline order intact.
   })
 })
