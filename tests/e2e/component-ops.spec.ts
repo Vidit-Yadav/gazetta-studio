@@ -11,6 +11,33 @@ function topLevelNames(page: Page): Promise<string[]> {
     .evaluateAll(blocks => blocks.map(block => block.getAttribute('data-component-name') ?? ''))
 }
 
+/**
+ * Save and wait for the post-save selection reload, not just the Save button.
+ * The button is disabled while clean and while saving; it can become disabled
+ * again before `selection.reload()` finishes, leaving `effectiveComponents`
+ * stale for a move issued in that window.
+ */
+async function saveAndWaitForReload(page: Page): Promise<void> {
+  const savedAndReloaded = new Promise<void>(resolve => {
+    let writeSeen = false
+    const onResponse = (response: import('@playwright/test').Response) => {
+      const url = new URL(response.url())
+      if (!url.pathname.endsWith('/api/pages/home')) return
+      const method = response.request().method()
+      if (method === 'PUT') {
+        writeSeen = true
+      } else if (writeSeen && method === 'GET') {
+        page.off('response', onResponse)
+        resolve()
+      }
+    }
+    page.on('response', onResponse)
+  })
+  await page.click('[data-testid="save-btn"]')
+  await savedAndReloaded
+  await expect(page.locator('[data-testid="save-btn"]')).toBeDisabled({ timeout: 10000 })
+}
+
 test.describe('Component operations', () => {
   // These tests mutate page.json on disk via the API. Isolation comes from the
   // worker-scoped testSite fixture — each Playwright worker has its own copy
@@ -66,8 +93,7 @@ test.describe('Component operations', () => {
     }).toPass({ timeout: 10000 })
 
     // Save flushes the pending reorder to disk
-    await page.click('[data-testid="save-btn"]')
-    await expect(page.locator('[data-testid="save-btn"]')).toBeDisabled({ timeout: 10000 })
+    await saveAndWaitForReload(page)
 
     // After save, selection.reload() asynchronously re-fetches the page
     // detail; the v-for then re-renders with the saved order. Save-btn-
@@ -82,8 +108,7 @@ test.describe('Component operations', () => {
 
     // Restore order so subsequent tests see hero above features
     await tree.moveDown('features')
-    await page.click('[data-testid="save-btn"]')
-    await expect(page.locator('[data-testid="save-btn"]')).toBeDisabled({ timeout: 10000 })
+    await saveAndWaitForReload(page)
     await expect(async () => {
       const heroAfter = await tree.row('hero').boundingBox()
       const featuresAfter = await tree.row('features').boundingBox()
@@ -128,7 +153,7 @@ test.describe('Component operations', () => {
     await expect(saveBtn).toBeEnabled()
 
     // Save flushes structural change to disk.
-    await saveBtn.click()
+    await saveAndWaitForReload(page)
     await expect(saveBtn).toBeDisabled({ timeout: 10000 })
 
     const afterJson = JSON.parse(readFileSync(pageJsonPath, 'utf8'))
@@ -148,7 +173,7 @@ test.describe('Component operations', () => {
 
     // Cleanup so subsequent tests in this file see the original order.
     await tree.moveDown('features')
-    await saveBtn.click()
+    await saveAndWaitForReload(page)
     await expect(saveBtn).toBeDisabled({ timeout: 10000 })
 
     // Mark the test info — useful when this regression is mentioned in the
@@ -204,8 +229,7 @@ test.describe('Component operations', () => {
 
     // Save flushes both Add + Duplicate. After save, the disk manifest
     // has both entries with the duplicate sitting right after the source.
-    await page.click('[data-testid="save-btn"]')
-    await expect(page.locator('[data-testid="save-btn"]')).toBeDisabled({ timeout: 10000 })
+    await saveAndWaitForReload(page)
 
     const pageJsonPath = join(testSite.projectDir, 'sites/main/targets/local/pages/home/page.json')
     const json = JSON.parse(readFileSync(pageJsonPath, 'utf8'))
@@ -218,8 +242,7 @@ test.describe('Component operations', () => {
     // Cleanup: remove both so the file ends in a stable state.
     await tree.remove(`${name}-copy`)
     await tree.remove(name)
-    await page.click('[data-testid="save-btn"]')
-    await expect(page.locator('[data-testid="save-btn"]')).toBeDisabled({ timeout: 10000 })
+    await saveAndWaitForReload(page)
   })
 
   test('Alt+ArrowDown on the focused handle moves the row one position (#105)', async ({ page, testSite }) => {
@@ -244,8 +267,7 @@ test.describe('Component operations', () => {
 
     // Save + restore so the test is idempotent for the file.
     const pageJsonPath = join(testSite.projectDir, 'sites/main/targets/local/pages/home/page.json')
-    await page.click('[data-testid="save-btn"]')
-    await expect(page.locator('[data-testid="save-btn"]')).toBeDisabled({ timeout: 10000 })
+    await saveAndWaitForReload(page)
 
     const afterJson = JSON.parse(readFileSync(pageJsonPath, 'utf8'))
     const afterNames = (afterJson.components as Array<string | { name: string }>).map(c =>
@@ -267,8 +289,41 @@ test.describe('Component operations', () => {
     // Restore order.
     await page.locator('[data-testid="drag-handle-hero"]').focus()
     await page.keyboard.press('Alt+ArrowUp')
-    await page.click('[data-testid="save-btn"]')
-    await expect(page.locator('[data-testid="save-btn"]')).toBeDisabled({ timeout: 10000 })
+    await saveAndWaitForReload(page)
+  })
+
+  test('dragging still works after the tree is emptied and repopulated', async ({ page }, testInfo) => {
+    await openEditor(page, 'home')
+    const tree = new ComponentTreePom(page)
+    const firstName = `drag-empty-a-${testInfo.testId}`
+    const secondName = `drag-empty-b-${testInfo.testId}`
+
+    const blocks = page.locator('[data-testid="component-tree-draggable"] > .top-level-block')
+    while ((await blocks.count()) > 0) {
+      const block = blocks.first()
+      await block.hover()
+      await block.locator('[data-testid^="remove-"]').click()
+    }
+    await expect(page.getByText('No components')).toBeVisible()
+    await expect(page.locator('[data-testid="component-tree-draggable"]')).toHaveCount(0)
+
+    await tree.add(firstName, 'text-block')
+    await tree.add(secondName, 'text-block')
+    await expect(tree.row(secondName)).toBeVisible({ timeout: 10000 })
+    await expect(page.locator('[data-testid="component-tree-draggable"]')).toBeVisible()
+
+    const handle = page.locator(`[data-testid="drag-handle-${secondName}"]`)
+    const target = tree.row(firstName)
+    const from = (await handle.boundingBox())!
+    const to = (await target.boundingBox())!
+
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2 - 10, { steps: 5 })
+    await page.mouse.move(to.x + to.width / 2, to.y + 2, { steps: 20 })
+    await page.mouse.up()
+
+    await expect.poll(async () => (await topLevelNames(page)).indexOf(secondName)).toBe(0)
   })
 
   test('dragging a top-level component by its grip reorders the tree', async ({ page }) => {

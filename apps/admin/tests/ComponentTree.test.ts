@@ -28,7 +28,13 @@ import { useEditingStore } from '../src/client/stores/editing.js'
 import { useEditorStashStore } from '../src/client/stores/editorStash.js'
 import { useEditorContentStore } from '../src/client/stores/editorContent.js'
 import { useEditorMetadataStore } from '../src/client/stores/editorMetadata.js'
+import { useEditorStructuralStore } from '../src/client/stores/editorStructural.js'
 import { api, type PageDetail, type FragmentDetail } from '../src/client/api/client.js'
+
+const dragAndDropMock = vi.hoisted(() => vi.fn())
+const tearDownMock = vi.hoisted(() => vi.fn())
+vi.mock('@formkit/drag-and-drop/vue', () => ({ dragAndDrop: dragAndDropMock }))
+vi.mock('@formkit/drag-and-drop', () => ({ tearDown: tearDownMock }))
 
 /** Minimal FragmentsApi fake — each method throws unless the test provides an impl. */
 function fakeFragmentsApi(partial: Partial<FragmentsApi> = {}): FragmentsApi {
@@ -538,6 +544,69 @@ describe('ComponentTree — drag handle + Alt+arrow reorder (#105)', () => {
     const blocks = w.findAll('.top-level-block')
     await blocks[0].trigger('keydown', { key: 'ArrowDown', altKey: true, shiftKey: true })
     expect(moveSpy).not.toHaveBeenCalled()
+  })
+
+  it('resolves a move against the visible rows while a save clears pending before reload', async () => {
+    const hero = { name: 'hero', template: 'hero' }
+    const features = { name: 'features', template: 'features-grid' }
+    setPageSelection({
+      name: 'home',
+      route: '/',
+      template: 'page-default',
+      dir: 'pages/home',
+      components: [hero, features],
+    })
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+
+    const structural = useEditorStructuralStore()
+    const key = { kind: 'page' as const, name: 'home' }
+    structural.moveComponent(key, [hero, features], 1, 0)
+    await flushMicrotasks()
+    const blocks = w.findAll('.top-level-block')
+    expect(blocks).toHaveLength(2)
+
+    const editing = useEditingStore()
+    const moveSpy = vi.spyOn(editing, 'moveComponentStructural')
+    structural.markWritten(structural.allEntries())
+    await blocks[1].trigger('keydown', { key: 'ArrowUp', altKey: true })
+
+    expect(moveSpy).toHaveBeenCalledTimes(1)
+    const args = moveSpy.mock.calls[0]
+    expect(args[1]).toEqual([features, hero])
+    expect(args[2]).toBe(1)
+    expect(args[3]).toBe(0)
+  })
+
+  it('rebinds drag listeners when an emptied tree is repopulated', async () => {
+    dragAndDropMock.mockClear()
+    tearDownMock.mockClear()
+    const hero = { name: 'hero', template: 'hero' }
+    setPageSelection({
+      name: 'home',
+      route: '/',
+      template: 'page-default',
+      dir: 'pages/home',
+      components: [hero],
+    })
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    expect(dragAndDropMock).toHaveBeenCalledTimes(1)
+    const firstParent = dragAndDropMock.mock.calls[0][0].parent as HTMLElement
+
+    const structural = useEditorStructuralStore()
+    const key = { kind: 'page' as const, name: 'home' }
+    structural.removeComponent(key, [hero], 0)
+    await flushMicrotasks()
+    expect(w.find('[data-testid="component-tree-draggable"]').exists()).toBe(false)
+    expect(tearDownMock).toHaveBeenCalledWith(firstParent)
+
+    structural.addComponent(key, [], hero)
+    await flushMicrotasks()
+    await w.vm.$nextTick()
+    expect(w.find('[data-testid="component-tree-draggable"]').exists()).toBe(true)
+    expect(dragAndDropMock).toHaveBeenCalledTimes(2)
+    expect(dragAndDropMock.mock.calls[1][0].parent).not.toBe(firstParent)
   })
 
   it('the draggable parent is rendered with the test id (DnD library hook target)', async () => {
