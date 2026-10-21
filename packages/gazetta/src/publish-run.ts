@@ -373,7 +373,14 @@ export async function publishRun(input: PublishRunInput): Promise<PublishRunResu
       // Compute per-item hash from caller-supplied map OR templateInfos.
       let manifestHash = input.itemHashes?.get(itemKey(ref))
       if (!manifestHash && input.templateInfos) {
-        const itemForHash = (ref.kind === 'page' ? input.site.pages : input.site.fragments).get(ref.name)
+        const localizedItem =
+          ref.locale === undefined
+            ? undefined
+            : ref.kind === 'page'
+              ? input.site.pageLocales.get(ref.name)?.locales.get(ref.locale)
+              : input.site.fragmentLocales.get(ref.name)?.locales.get(ref.locale)
+        const itemForHash =
+          localizedItem ?? (ref.kind === 'page' ? input.site.pages : input.site.fragments).get(ref.name)
         if (itemForHash) {
           // Static-mode pages need fragmentHashes folded in so a
           // fragment change invalidates every page that bakes it.
