@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, onBeforeUnmount } from 'vue'
+import { computed, ref, watch, nextTick, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { dragAndDrop } from '@formkit/drag-and-drop/vue'
 import Button from 'primevue/button'
@@ -85,20 +85,24 @@ async function buildComponentNode(
   index: number,
   parentTreePath: string,
   map: Map<string, GzEntry>,
+  fragmentCounts: Map<string, number>,
 ): Promise<ComponentNode> {
   // Fragment reference
   if (typeof entry === 'string') {
     const fragName = entry.slice(1)
+    const occurrence = fragmentCounts.get(fragName) ?? 0
+    fragmentCounts.set(fragName, occurrence + 1)
     const treePath = parentTreePath ? `${parentTreePath}/${entry}` : entry
     const gzId = hashPath(treePath)
     map.set(gzId, { isFragment: true, fragName })
     try {
       const frag = await fragmentsApi.getFragment(fragName)
+      const childCounts = new Map<string, number>()
       const children = frag.components
-        ? await Promise.all(frag.components.map((c, i) => buildComponentNode(c, i, treePath, map)))
+        ? await Promise.all(frag.components.map((c, i) => buildComponentNode(c, i, treePath, map, childCounts)))
         : []
       return {
-        key: `frag:${fragName}:${index}`,
+        key: `frag:${fragName}:${occurrence}`,
         label: entry,
         data: {
           isFragment: true,
@@ -113,7 +117,7 @@ async function buildComponentNode(
       }
     } catch (err) {
       return {
-        key: `frag:${fragName}:${index}`,
+        key: `frag:${fragName}:${occurrence}`,
         label: entry,
         data: { isFragment: true, fragName, treePath, index, isTopLevel: true, error: (err as Error).message },
         children: [],
@@ -124,14 +128,15 @@ async function buildComponentNode(
   // Inline component
   const treePath = parentTreePath ? `${parentTreePath}/${entry.name}` : entry.name
   const gzId = hashPath(treePath)
+  const childCounts = new Map<string, number>()
   const children: ComponentNode[] = entry.components
-    ? await Promise.all(entry.components.map((c, i) => buildComponentNode(c, i, treePath, map)))
+    ? await Promise.all(entry.components.map((c, i) => buildComponentNode(c, i, treePath, map, childCounts)))
     : []
 
   map.set(gzId, { path: treePath, template: entry.template })
 
   return {
-    key: `comp:${treePath}:${index}`,
+    key: `comp:${treePath}`,
     label: entry.name,
     data: { path: treePath, template: entry.template, treePath, isFragment: false, index, isTopLevel: true },
     children: children.map(c => ({ ...c, data: { ...c.data, isTopLevel: false } })),
@@ -149,8 +154,9 @@ watch(
 
     const map = new Map<string, GzEntry>()
     const rootPath = selection.type === 'fragment' ? `@${selection.name}` : ''
+    const fragmentCounts = new Map<string, number>()
     const children = comps
-      ? await Promise.all(comps.map((entry, i) => buildComponentNode(entry, i, rootPath, map)))
+      ? await Promise.all(comps.map((entry, i) => buildComponentNode(entry, i, rootPath, map, fragmentCounts)))
       : []
 
     const rootNode: ComponentNode = {
@@ -481,36 +487,42 @@ function currentManifestKey(): import('gazetta/types').ManifestKey | null {
  *     buttons replaced by the grip handle in #105)
  *   - the Alt+ArrowUp / Alt+ArrowDown keyboard shortcut (Q6)
  */
-function moveComponent(index: number, direction: -1 | 1) {
+function moveComponentTo(index: number, toIndex: number) {
   const comps = effectiveComponents.value
   if (!comps) return
-  const newIndex = index + direction
-  if (newIndex < 0 || newIndex >= comps.length) return
+  if (toIndex < 0 || toIndex >= comps.length || index === toIndex) return
   const key = currentManifestKey()
   if (!key) return
-  editing.moveComponentStructural(key, comps, index, newIndex)
+  editing.moveComponentStructural(key, comps, index, toIndex)
+}
+
+function moveComponent(index: number, direction: -1 | 1) {
+  moveComponentTo(index, index + direction)
 }
 
 // --- Drag-and-drop reorder (#105) ---
 //
-// `@formkit/drag-and-drop` operates on a ref of values; on a successful
-// drop it mutates the ref to the new order and fires `onSort`. We sync
-// `dragValues` from `effectiveComponents` so the lib's view tracks the
-// store; on `onSort` we dispatch to `editing.moveComponentStructural`.
-//
-// One drag = one position move (same model as the legacy buttons), so
-// we extract `previousPosition` + `position` from the SortEventData and
-// forward to the store action. The store update propagates back through
-// `effectiveComponents` → `dragValues` watcher; the lib's mutated state
-// converges with the store's authoritative state.
+// `@formkit/drag-and-drop` operates on a ref of values and mutates it on
+// every live sort while the pointer crosses rows. We deliberately ignore
+// those intermediate `onSort` events: the library's node indices are stale
+// across multiple sorts in one gesture, so committing each event moves the
+// wrong row. Instead, one drag commits exactly one position move on
+// `onDragend`, using the pointer's release point over the target block.
 //
 // `dragHandle: '.drag-handle'` restricts pointer drag to clicks on the
-// grip element (not the row body — preserves click-to-select). Keyboard
-// reorder is the library's default (Space-to-lift + arrows + Space-to-
-// drop) and works against the focused row regardless of handle.
+// grip element (not the row body — preserves click-to-select).
+//
+// The library's `handleNodeFocus` disables native drag when focus moves
+// into a child during pointerdown. The grip is itself a focusable button,
+// so that guard would disable the block before a drag could start. Keep
+// the guard for the row's other focusable children, but exempt the grip.
+// (The library's keyboard handler is empty in 0.5.3; the app handles
+// Space-to-lift in `onTopLevelKeydown` below.)
 
 const dragParentRef = ref<HTMLElement | null>(null)
 const dragValues = ref<import('../api/client.js').ComponentEntry[]>([])
+const dragSourceIndex = ref<number | null>(null)
+const keyboardLift = ref<{ from: number; to: number } | null>(null)
 
 watch(
   effectiveComponents,
@@ -520,30 +532,79 @@ watch(
   { immediate: true },
 )
 
-function onDragSort(data: { previousPosition: number; position: number }): void {
-  const { previousPosition, position } = data
-  if (previousPosition === position) return
-  const key = currentManifestKey()
-  if (!key) return
-  const comps = effectiveComponents.value
-  if (!comps) return
-  // The library has already mutated dragValues to the new order. Dispatch
-  // the canonical move to the structural-pending store; the watcher above
-  // re-syncs dragValues from effectiveComponents on the next tick (no-op
-  // when orders match).
-  editing.moveComponentStructural(key, comps, previousPosition, position)
-}
-
 let dragInitialized = false
+let dragDropped = false
+let synthDrag = false
+let dropPoint: { blockIndex: number; after: boolean } | null = null
 
 function setupDrag(el: HTMLElement | null) {
   if (!el || dragInitialized) return
   dragInitialized = true
+  // Native drops fire `drop`; synthetic (touch) drops fire `pointerup`.
+  // `onDragend` also fires for canceled drags, so require one of these
+  // before committing the last hovered position. Capture the release
+  // point too: the library's `incomingDirection` is entry direction,
+  // not the drop half, so it can't distinguish before/after a block.
+  const recordDrop = (e: DragEvent | PointerEvent) => {
+    const block = e.target instanceof Element ? e.target.closest('.top-level-block') : null
+    if (!(block instanceof HTMLElement) || !el.contains(block)) return
+    const blocks = [...el.querySelectorAll<HTMLElement>(':scope > .top-level-block')]
+    const blockIndex = blocks.indexOf(block)
+    if (blockIndex === -1) return
+    const rect = block.getBoundingClientRect()
+    dropPoint = { blockIndex, after: e.clientY > rect.top + rect.height / 2 }
+    dragDropped = true
+  }
+  el.addEventListener('drop', recordDrop, true)
+  el.addEventListener(
+    'pointerup',
+    e => {
+      if (synthDrag) recordDrop(e)
+    },
+    true,
+  )
   dragAndDrop({
     parent: el,
     values: dragValues,
     dragHandle: '.drag-handle',
-    onSort: data => onDragSort(data as { previousPosition: number; position: number }),
+    handleNodeFocus: (data, state) => {
+      if (data.e.target === data.e.currentTarget || !state.pointerDown) return
+      if (data.e.target instanceof Element && data.e.target.closest('.drag-handle')) return
+      state.pointerDown.node.el.draggable = false
+    },
+    onDragstart: data => {
+      dragSourceIndex.value = data.position
+      synthDrag = 'clonedDraggedNode' in data.state
+      dragDropped = false
+      dropPoint = null
+    },
+    onDragend: data => {
+      const from = dragSourceIndex.value
+      const dropped = dragDropped
+      const point = dropPoint
+      const state = data.state as { targetIndex?: number; incomingDirection?: string }
+      dragSourceIndex.value = null
+      dragDropped = false
+      synthDrag = false
+      dropPoint = null
+      if (dropped && from !== null) {
+        // Prefer the release-point block. Fall back to the library's
+        // target for synthetic drags that didn't expose a DOM target.
+        const insertAt = point
+          ? point.blockIndex + (point.after ? 1 : 0)
+          : state.targetIndex !== undefined
+            ? state.targetIndex + (state.incomingDirection === 'below' ? 1 : 0)
+            : undefined
+        if (insertAt !== undefined) {
+          const to = from < insertAt ? insertAt - 1 : insertAt
+          if (to !== from) moveComponentTo(from, to)
+        }
+      }
+      // The library mutates `dragValues` on every live sort; reset it to
+      // the store's authoritative order whether or not the drop moved.
+      const comps = effectiveComponents.value
+      dragValues.value = comps ? [...comps] : []
+    },
   })
 }
 
@@ -557,6 +618,8 @@ onBeforeUnmount(() => {
 
 /**
  * Keyboard shortcuts on a focused top-level row:
+ *   - Space, ArrowUp/Down, Space — lift, move, drop (#105 Q6).
+ *   - Escape — cancel a lifted row.
  *   - Alt+ArrowUp / Alt+ArrowDown — move the row one position (#105 Q6).
  *   - Cmd+D (Mac) / Ctrl+D — duplicate the row (#45). Same modifier
  *     pattern as Notion / Figma / Pages.
@@ -577,8 +640,46 @@ function onTopLevelKeydown(ev: KeyboardEvent, index: number): void {
     duplicateComponent(index)
     return
   }
+
+  // Space-to-lift / Space-to-drop on the grip (WAI-ARIA grab pattern).
+  // The handler lives on the block, so ignore Space from action buttons.
+  const handle = ev.target instanceof Element ? ev.target.closest<HTMLElement>('.drag-handle') : null
+  const noModifiers = !ev.altKey && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey
+  if (handle && noModifiers && (ev.key === ' ' || ev.key === 'Spacebar')) {
+    ev.preventDefault()
+    if (keyboardLift.value && keyboardLift.value.from === index) {
+      const { from, to } = keyboardLift.value
+      keyboardLift.value = null
+      if (from !== to) {
+        pendingFocusLabel.value = topLevelNodes.value[index]?.label ?? null
+        moveComponentTo(from, to)
+        void nextTick(() => handle.focus())
+      }
+    } else {
+      keyboardLift.value = { from: index, to: index }
+    }
+    return
+  }
+
+  if (keyboardLift.value && ev.key === 'Escape') {
+    ev.preventDefault()
+    keyboardLift.value = null
+    return
+  }
+
+  if (keyboardLift.value && keyboardLift.value.from === index && noModifiers) {
+    if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+      ev.preventDefault()
+      const delta = ev.key === 'ArrowUp' ? -1 : 1
+      const lastIndex = topLevelNodes.value.length - 1
+      keyboardLift.value.to = Math.max(0, Math.min(lastIndex, keyboardLift.value.to + delta))
+      return
+    }
+  }
+
   // Alt+ArrowUp / Alt+ArrowDown — move. Modifier-only check (Alt only).
   if (!ev.altKey || ev.shiftKey || ev.ctrlKey || ev.metaKey) return
+  keyboardLift.value = null
   if (ev.key === 'ArrowUp') {
     if (index === 0) return
     ev.preventDefault()
@@ -590,13 +691,32 @@ function onTopLevelKeydown(ev: KeyboardEvent, index: number): void {
   }
 }
 
-function removeComponent(index: number) {
+const pendingFocusLabel = ref<string | null>(null)
+
+watch(
+  componentNodes,
+  () => {
+    const label = pendingFocusLabel.value
+    if (!label || !dragParentRef.value) return
+    pendingFocusLabel.value = null
+    const handle = Array.from(dragParentRef.value.querySelectorAll<HTMLElement>('.drag-handle')).find(
+      el => el.dataset.testid === `drag-handle-${label}`,
+    )
+    handle?.focus()
+  },
+  { flush: 'post' },
+)
+
+const pendingRemove = ref<{ key: NonNullable<ReturnType<typeof currentManifestKey>>; indices: number[] } | null>(null)
+
+function removeComponentAt(index: number) {
   const comps = effectiveComponents.value
   if (!comps) return
   const key = currentManifestKey()
   if (!key) return
 
   const removed = comps[index]
+  if (!removed) return
   const removedName = typeof removed === 'string' ? removed : removed.name
 
   // The path is about to disappear from the manifest — drop any open editor
@@ -607,6 +727,41 @@ function removeComponent(index: number) {
   editing.removeComponentStructural(key, comps, index)
   toast.show(`Removed "${removedName}"`)
 }
+
+function removeComponent(index: number) {
+  const comps = effectiveComponents.value
+  const key = currentManifestKey()
+  if (!comps || !key) return
+  if (comps[index]) {
+    removeComponentAt(index)
+    return
+  }
+  // A post-save reload can briefly expose the pre-save detail array while
+  // the DOM still shows the saved rows. Defer the click until the new
+  // array lands instead of indexing past the end.
+  if (!pendingRemove.value || pendingRemove.value.key.kind !== key.kind || pendingRemove.value.key.name !== key.name) {
+    pendingRemove.value = { key, indices: [] }
+  }
+  if (!pendingRemove.value.indices.includes(index)) pendingRemove.value.indices.push(index)
+}
+
+watch(
+  effectiveComponents,
+  comps => {
+    const pending = pendingRemove.value
+    if (!pending || !comps) return
+    const key = currentManifestKey()
+    if (!key || key.kind !== pending.key.kind || key.name !== pending.key.name) {
+      pendingRemove.value = null
+      return
+    }
+    const indices = pending.indices.filter(index => !!comps[index]).sort((a, b) => b - a)
+    if (indices.length === 0) return
+    pendingRemove.value = null
+    for (const index of indices) removeComponentAt(index)
+  },
+  { flush: 'post' },
+)
 
 function addComponent(name: string, template: string) {
   const comps = effectiveComponents.value
@@ -722,7 +877,7 @@ function nextDuplicateName(
       <div v-for="(topNode, topIndex) in topLevelNodes"
         :key="topNode.key"
         :data-component-name="topNode.label"
-        class="top-level-block"
+        :class="['top-level-block', { 'keyboard-lifted': keyboardLift?.from === topIndex }]"
         @keydown="onTopLevelKeydown($event, topIndex)">
         <!-- The top-level row itself — draggable via the grip handle. -->
         <div
@@ -735,8 +890,8 @@ function nextDuplicateName(
             type="button"
             class="drag-handle"
             :data-testid="`drag-handle-${topNode.label}`"
-            :aria-label="`Drag ${topNode.label} to reorder, or press Alt+Arrow Up/Down`"
-            :title="`Drag to reorder, or press Alt+Up/Alt+Down`"
+            :aria-label="`Drag ${topNode.label} to reorder, or press Space then Arrow Up/Down, then Space again. Alt+Arrow moves immediately.`"
+            :title="`Drag to reorder, or press Space + Arrow Up/Down + Space`"
             tabindex="0"
             @click.stop>
             <i class="pi pi-bars" aria-hidden="true" />
@@ -821,6 +976,11 @@ function nextDuplicateName(
    so it's keyboard-focusable and screen-reader-discoverable. */
 .top-level-list { display: flex; flex-direction: column; gap: 0; }
 .top-level-block { display: flex; flex-direction: column; }
+.top-level-block.keyboard-lifted > .top-level-row {
+  background: var(--color-hover-bg);
+  outline: 1px dashed var(--p-violet-400);
+  outline-offset: -1px;
+}
 .drag-handle {
   display: flex;
   align-items: center;
