@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, nextTick, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { tearDown } from '@formkit/drag-and-drop'
 import { dragAndDrop } from '@formkit/drag-and-drop/vue'
 import Button from 'primevue/button'
 import { useSelectionStore } from '../stores/selection.js'
@@ -491,9 +492,25 @@ function moveComponentTo(index: number, toIndex: number) {
   const comps = effectiveComponents.value
   if (!comps) return
   if (toIndex < 0 || toIndex >= comps.length || index === toIndex) return
+  // During the gap between markWritten() and selection.reload(), the tree can
+  // still render the saved pending order while `effectiveComponents` already
+  // points at the pre-save disk order. Resolve the move against the rendered
+  // rows so the captured index targets the entry the author sees.
+  const domNames = [...(dragParentRef.value?.querySelectorAll<HTMLElement>(':scope > .top-level-block') ?? [])].map(
+    el => el.dataset.componentName ?? '',
+  )
+  const remaining = [...comps]
+  const visible = domNames.map(name => {
+    const at = remaining.findIndex(entry => (typeof entry === 'string' ? entry : entry.name) === name)
+    return at === -1 ? undefined : remaining.splice(at, 1)[0]
+  })
+  const current =
+    domNames.length === comps.length && visible.every(entry => entry !== undefined)
+      ? (visible as import('../api/client.js').ComponentEntry[])
+      : comps
   const key = currentManifestKey()
   if (!key) return
-  editing.moveComponentStructural(key, comps, index, toIndex)
+  editing.moveComponentStructural(key, current, index, toIndex)
 }
 
 function moveComponent(index: number, direction: -1 | 1) {
@@ -532,14 +549,27 @@ watch(
   { immediate: true },
 )
 
-let dragInitialized = false
+let dragBoundEl: HTMLElement | null = null
+let dragAbort: AbortController | null = null
 let dragDropped = false
 let synthDrag = false
 let dropPoint: { blockIndex: number; after: boolean } | null = null
 
 function setupDrag(el: HTMLElement | null) {
-  if (!el || dragInitialized) return
-  dragInitialized = true
+  if (el === dragBoundEl) return
+  // The draggable list is behind `v-if="topLevelNodes.length"`. When the last
+  // component is removed and a later add recreates the element, the old
+  // listeners belong to a detached node and the library has no parent for the
+  // new one. Tear down the old binding before initializing the new element.
+  if (dragBoundEl) {
+    dragAbort?.abort()
+    dragAbort = null
+    tearDown(dragBoundEl)
+  }
+  dragBoundEl = el
+  if (!el) return
+  dragAbort = new AbortController()
+  const { signal } = dragAbort
   // Native drops fire `drop`; synthetic (touch) drops fire `pointerup`.
   // `onDragend` also fires for canceled drags, so require one of these
   // before committing the last hovered position. Capture the release
@@ -555,13 +585,13 @@ function setupDrag(el: HTMLElement | null) {
     dropPoint = { blockIndex, after: e.clientY > rect.top + rect.height / 2 }
     dragDropped = true
   }
-  el.addEventListener('drop', recordDrop, true)
+  el.addEventListener('drop', recordDrop, { capture: true, signal })
   el.addEventListener(
     'pointerup',
     e => {
       if (synthDrag) recordDrop(e)
     },
-    true,
+    { capture: true, signal },
   )
   dragAndDrop({
     parent: el,
@@ -611,9 +641,10 @@ function setupDrag(el: HTMLElement | null) {
 watch(dragParentRef, el => setupDrag(el))
 
 onBeforeUnmount(() => {
-  // Library cleanup is implicit — the parent element going out of the
-  // DOM detaches its event listeners. Local guard reset for HMR.
-  dragInitialized = false
+  dragAbort?.abort()
+  dragAbort = null
+  if (dragBoundEl) tearDown(dragBoundEl)
+  dragBoundEl = null
 })
 
 /**
