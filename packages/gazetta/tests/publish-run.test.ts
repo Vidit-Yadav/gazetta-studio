@@ -18,11 +18,13 @@ import {
   type PublishRunResult,
   type PublishTargetResult,
 } from '../src/publish-run.js'
+import { compareTargets } from '../src/compare.js'
 import { createContentRoot } from '../src/content-root.js'
 import { createFilesystemProvider } from '../src/providers/filesystem.js'
 import { loadSite, type Site } from '../src/site-loader.js'
+import { scanTemplates } from '../src/templates-scan.js'
 import { memoryStorage, type MemoryStorage } from './_helpers/memory-storage.js'
-import { starterManifest, starterTargetDir, starterTemplatesDir } from './_helpers/starter.js'
+import { starterManifest, starterProjectRoot, starterTargetDir, starterTemplatesDir } from './_helpers/starter.js'
 
 async function loadStarterSite(): Promise<Site> {
   const storage = createFilesystemProvider(starterTargetDir)
@@ -232,6 +234,37 @@ describe('publishRun — fan-out', () => {
     const entries = await targetStorage.readDir(`pages/${pageName}`)
     expect(entries.find(e => e.name === '.feedface.hash')).toBeDefined()
   })
+
+  it('#1000: locale variant hash matches its own manifest, so compare sees it unchanged', async () => {
+    const { site, manifest, sourceRoot } = await setup()
+    const targetStorage = memoryStorage()
+    const templateInfos = await scanTemplates(starterTemplatesDir, starterProjectRoot)
+    expect(site.pageLocales.get('home')?.locales.get('fr')).toBeDefined()
+
+    await publishRun({
+      items: [{ kind: 'page', name: 'home', locale: 'fr' }],
+      targets: ['local'],
+      site,
+      sourceRoot,
+      siteManifest: manifest,
+      targetStorages: new Map([['local', targetStorage]]),
+      templateInfos,
+      publishAssetsBeforeItems: false,
+      publishDepIndicesAfter: false,
+      publishSiteManifestAfter: false,
+    })
+
+    const cmp = await compareTargets({
+      sourceRoot: createContentRoot(createFilesystemProvider(starterTargetDir), ''),
+      target: targetStorage,
+      templatesDir: starterTemplatesDir,
+      projectRoot: starterProjectRoot,
+      type: 'static',
+      scanTemplates: async () => templateInfos,
+      manifest,
+    })
+    expect(cmp.unchanged).toContain('pages/home:fr')
+  }, 30_000)
 })
 
 // ─── Progress events ───────────────────────────────────────────────
