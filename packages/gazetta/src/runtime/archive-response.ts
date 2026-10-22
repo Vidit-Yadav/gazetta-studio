@@ -14,16 +14,30 @@
 import { parseArchiveMarker } from './archive-marker.js'
 import { deriveRoute } from './derive-route.js'
 
-const ARCHIVE_CACHE_CONTROL = 'max-age=300'
+export const ARCHIVE_CACHE_CONTROL = 'max-age=300'
+
+export function archiveGoneResponse(): Response {
+  return new Response(null, { status: 410, headers: { 'Cache-Control': ARCHIVE_CACHE_CONTROL } })
+}
 
 export function archiveResponse(input: Uint8Array | string): Response | null {
   const marker = parseArchiveMarker(input)
   if (!marker) return null
 
-  const headers: Record<string, string> = { 'Cache-Control': ARCHIVE_CACHE_CONTROL }
-  if (marker.kind === 'alias') {
-    headers.Location = deriveRoute(marker.target)
-    return new Response(null, { status: 301, headers })
+  if (marker.kind === 'gone') return archiveGoneResponse()
+
+  const location = deriveRoute(marker.target)
+  if (!location.startsWith('/') || location.startsWith('//') || location.includes('\\')) {
+    return archiveGoneResponse()
   }
-  return new Response(null, { status: 410, headers })
+
+  try {
+    const headers: Record<string, string> = {
+      'Cache-Control': ARCHIVE_CACHE_CONTROL,
+      Location: encodeURI(location).replace(/#/g, '%23').replace(/\?/g, '%3F'),
+    }
+    return new Response(null, { status: 301, headers })
+  } catch {
+    return archiveGoneResponse()
+  }
 }

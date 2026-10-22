@@ -70,25 +70,36 @@ function esiSeed(): Record<string, string> {
       archiveMarker({ kind: 'alias', target: 'home' }) + '<!--esi:/fragments/header/index.html-->',
     'pages/legacy/index.html': archiveMarker({ kind: 'gone' }),
     'pages/old-docs/index.html': archiveMarker({ kind: 'alias', target: 'blog/[slug]' }),
+    'pages/cafe/index.html': archiveMarker({ kind: 'alias', target: 'café' }),
+    'pages/café/index.html': LIVE_PAGE,
+    'pages/with-aliased-fragment/index.html':
+      '<html><head></head><body>Page<!--esi:/fragments/old-header/index.html--></body></html>',
+    'pages/with-gone-fragment/index.html':
+      '<html><head></head><body>Page<!--esi:/fragments/gone-header/index.html--></body></html>',
     'pages/late/index.html': `${'x'.repeat(240)}\n${archiveMarker({ kind: 'gone' })}`,
     'fragments/header/index.html': '<head><style>.header{color:red}</style></head><body>Header</body>',
+    'fragments/old-header/index.html': archiveMarker({ kind: 'alias', target: 'header' }),
+    'fragments/gone-header/index.html': archiveMarker({ kind: 'gone' }),
   }
 }
 
 let originalCaches: PropertyDescriptor | undefined
 let cachePuts: string[]
+let cacheStore: Map<string, Response>
 
 beforeEach(() => {
   originalCaches = Object.getOwnPropertyDescriptor(globalThis, 'caches')
   cachePuts = []
+  cacheStore = new Map()
   Object.defineProperty(globalThis, 'caches', {
     configurable: true,
     writable: true,
     value: {
       default: {
-        match: async () => undefined,
-        put: async (request: Request) => {
+        match: async (request: Request) => cacheStore.get(request.url)?.clone(),
+        put: async (request: Request, response: Response) => {
           cachePuts.push(request.url)
+          cacheStore.set(request.url, response.clone())
         },
       },
     },
@@ -119,7 +130,64 @@ describe('Cloudflare worker archive markers', () => {
     expect(res.headers.get('location')).toBe('/')
     expect(res.headers.get('cache-control')).toBe(ARCHIVE_CACHE_CONTROL)
     expect(getCalls.some(key => key.startsWith('fragments/'))).toBe(false)
-    expect(cachePuts).toHaveLength(0)
+    expect(cachePuts).toHaveLength(1)
+  })
+
+  it('serves a cached archive response without another R2 read', async () => {
+    const { bucket, getCalls } = fakeBucket(esiSeed())
+    const app = createWorker()
+
+    expect((await fetchPage(app, bucket, '/about')).status).toBe(301)
+    const callsAfterFirst = getCalls.length
+
+    const second = await fetchPage(app, bucket, '/about')
+
+    expect(second.status).toBe(301)
+    expect(second.headers.get('location')).toBe('/')
+    expect(getCalls).toHaveLength(callsAfterFirst)
+  })
+
+  it('percent-encodes non-Latin-1 alias targets', async () => {
+    const { bucket } = fakeBucket(esiSeed())
+    const app = createWorker()
+
+    const res = await fetchPage(app, bucket, '/cafe')
+
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe('/caf%C3%A9')
+  })
+
+  it('handles a direct page index path through the asset route', async () => {
+    const { bucket } = fakeBucket(esiSeed())
+    const app = createWorker()
+
+    const res = await fetchPage(app, bucket, '/pages/about/index.html')
+
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe('/')
+    expect(res.headers.get('cache-control')).toBe(ARCHIVE_CACHE_CONTROL)
+  })
+
+  it('follows an archived fragment alias while composing ESI', async () => {
+    const { bucket } = fakeBucket(esiSeed())
+    const app = createWorker()
+
+    const res = await fetchPage(app, bucket, '/with-aliased-fragment')
+
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('Header')
+    expect(body).not.toContain('gazetta:archived')
+  })
+
+  it('returns 410 when an ESI fragment is archived without an alias', async () => {
+    const { bucket } = fakeBucket(esiSeed())
+    const app = createWorker()
+
+    const res = await fetchPage(app, bucket, '/with-gone-fragment')
+
+    expect(res.status).toBe(410)
+    expect(res.headers.get('cache-control')).toBe(ARCHIVE_CACHE_CONTROL)
   })
 
   it('uses the derived route for non-trivial page names', async () => {
@@ -189,5 +257,19 @@ describe('Cloudflare worker archive markers', () => {
 
     expect(res.status).toBe(200)
     expect(await res.text()).toContain('Guides EN')
+  })
+
+  it('returns the built-in 404 instead of an archived 404 marker', async () => {
+    const seed = esiSeed()
+    seed['pages/404/index.html'] = archiveMarker({ kind: 'alias', target: 'home' })
+    const { bucket } = fakeBucket(seed)
+    const app = createWorker()
+
+    const res = await fetchPage(app, bucket, '/missing')
+
+    expect(res.status).toBe(404)
+    const body = await res.text()
+    expect(body).toContain('Page not found')
+    expect(body).not.toContain('gazetta:archived')
   })
 })

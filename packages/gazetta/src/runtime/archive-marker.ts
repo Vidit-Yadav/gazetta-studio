@@ -43,18 +43,36 @@ const MARKER_RE = /^<!-- gazetta:archived (alias=([\S]+)|gone) -->/
  * For aliased archives: `archiveMarker({ kind: 'alias', target: 'welcome' })`
  * For pure soft-delete: `archiveMarker({ kind: 'gone' })`
  *
- * Validates the alias target is non-empty and contains no whitespace
- * (the regex grammar requires `\S+`); throws on bad input rather than
- * silently emitting an unparseable marker.
+ * Validates the alias target is non-empty, contains no whitespace,
+ * is a relative item name (not an absolute or protocol-relative path),
+ * and keeps the marker within the 200-byte inspection window. Throws
+ * on bad input rather than silently emitting an unparseable marker.
  */
 export function archiveMarker(marker: ArchiveMarker): string {
   if (marker.kind === 'alias') {
-    if (!marker.target || /\s/.test(marker.target)) {
+    const target = marker.target
+    if (!target || /\s/.test(target)) {
       throw new Error(
-        `Invalid archive alias target ${JSON.stringify(marker.target)} — must be a non-empty string with no whitespace.`,
+        `Invalid archive alias target ${JSON.stringify(target)} — must be a non-empty string with no whitespace.`,
       )
     }
-    return `<!-- gazetta:archived alias=${marker.target} -->\n`
+    if (target.startsWith('/') || target.includes('\\') || /[?#]/.test(target)) {
+      throw new Error(
+        `Invalid archive alias target ${JSON.stringify(target)} — must be a relative page or fragment name.`,
+      )
+    }
+    if (target.split('/').some(part => part === '' || part === '.' || part === '..')) {
+      throw new Error(
+        `Invalid archive alias target ${JSON.stringify(target)} — must not contain empty, "." or ".." path segments.`,
+      )
+    }
+    const line = `<!-- gazetta:archived alias=${target} -->`
+    if (new TextEncoder().encode(line).byteLength > MARKER_PREFIX_BYTES) {
+      throw new Error(
+        `Invalid archive alias target ${JSON.stringify(target)} — marker exceeds the ${MARKER_PREFIX_BYTES}-byte inspection window.`,
+      )
+    }
+    return `${line}\n`
   }
   return '<!-- gazetta:archived gone -->\n'
 }
@@ -73,7 +91,9 @@ export function archiveMarker(marker: ArchiveMarker): string {
  * a file are not detected (per the locked grammar — first-line only).
  */
 export function parseArchiveMarker(input: Uint8Array | string): ArchiveMarker | null {
-  const prefix = typeof input === 'string' ? input.slice(0, MARKER_PREFIX_BYTES) : decodePrefix(input)
+  const prefix = decodePrefix(
+    typeof input === 'string' ? new TextEncoder().encode(input.slice(0, MARKER_PREFIX_BYTES)) : input,
+  )
   const match = MARKER_RE.exec(prefix)
   if (!match) return null
   if (match[1] === 'gone') return { kind: 'gone' }

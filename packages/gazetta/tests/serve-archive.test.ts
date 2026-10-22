@@ -28,6 +28,15 @@ function esiSeed(): Record<string, string> {
       archiveMarker({ kind: 'alias', target: 'home' }) + '<!--esi:/fragments/header/index.html-->',
     'pages/legacy/index.html': archiveMarker({ kind: 'gone' }),
     'pages/old-docs/index.html': archiveMarker({ kind: 'alias', target: 'blog/[slug]' }),
+    'pages/cafe/index.html': archiveMarker({ kind: 'alias', target: 'café' }),
+    'pages/café/index.html': LIVE_PAGE,
+    'pages/with-aliased-fragment/index.html':
+      '<html><head></head><body>Page<!--esi:/fragments/old-header/index.html--></body></html>',
+    'pages/with-gone-fragment/index.html':
+      '<html><head></head><body>Page<!--esi:/fragments/gone-header/index.html--></body></html>',
+    'fragments/header/index.html': '<head><style>.header{color:red}</style></head><body>Header</body>',
+    'fragments/old-header/index.html': archiveMarker({ kind: 'alias', target: 'header' }),
+    'fragments/gone-header/index.html': archiveMarker({ kind: 'gone' }),
     // Marker beyond the 200-byte detection window — not an archive marker.
     'pages/late/index.html': `${'x'.repeat(240)}\n${archiveMarker({ kind: 'gone' })}`,
     // Marker-like text inside a live page — not at byte 0.
@@ -51,6 +60,41 @@ describe('serve archive markers (dynamic/ESI)', () => {
 
     expect(res.status).toBe(301)
     expect(res.headers.get('location')).toBe('/blog/:slug')
+  })
+
+  it('percent-encodes non-Latin-1 alias targets', async () => {
+    const app = buildServer(esiSeed())
+    const res = await app.request('http://localhost/cafe')
+
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe('/caf%C3%A9')
+  })
+
+  it('handles a direct page index path through the asset route', async () => {
+    const app = buildServer(esiSeed())
+    const res = await app.request('http://localhost/pages/about/index.html')
+
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe('/')
+    expect(res.headers.get('cache-control')).toBe(ARCHIVE_CACHE_CONTROL)
+  })
+
+  it('follows an archived fragment alias while composing ESI', async () => {
+    const app = buildServer(esiSeed())
+    const res = await app.request('http://localhost/with-aliased-fragment')
+
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('Header')
+    expect(body).not.toContain('gazetta:archived')
+  })
+
+  it('returns 410 when an ESI fragment is archived without an alias', async () => {
+    const app = buildServer(esiSeed())
+    const res = await app.request('http://localhost/with-gone-fragment')
+
+    expect(res.status).toBe(410)
+    expect(res.headers.get('cache-control')).toBe(ARCHIVE_CACHE_CONTROL)
   })
 
   it('returns 410 Gone for a gone page', async () => {
@@ -98,6 +142,21 @@ describe('serve archive markers (dynamic/ESI)', () => {
   })
 })
 
+describe('serve archived 404 fallback', () => {
+  it('returns the built-in 404 instead of an archived 404 marker', async () => {
+    const seed = esiSeed()
+    seed['pages/404/index.html'] = archiveMarker({ kind: 'alias', target: 'home' })
+    const app = buildServer(seed)
+
+    const res = await app.request('http://localhost/missing')
+
+    expect(res.status).toBe(404)
+    const body = await res.text()
+    expect(body).toContain('Page not found')
+    expect(body).not.toContain('gazetta:archived')
+  })
+})
+
 describe('serve archive markers (localized)', () => {
   it('honors archive markers on locale-suffixed files', async () => {
     const seed = esiSeed()
@@ -129,6 +188,8 @@ describe('serve archive markers (static)', () => {
       // static serve builds non-root paths with a leading slash.
       '/about/index.html': archiveMarker({ kind: 'alias', target: 'home' }),
       '/legacy/index.html': archiveMarker({ kind: 'gone' }),
+      // Explicit /about/index.html falls back to the extensionless key.
+      'about/index.html': archiveMarker({ kind: 'alias', target: 'home' }),
     }
   }
 
@@ -155,5 +216,14 @@ describe('serve archive markers (static)', () => {
 
     expect(res.status).toBe(200)
     expect(await res.text()).toContain('Live page')
+  })
+
+  it('handles explicit /index.html archive paths', async () => {
+    const app = buildServer(staticSeed(), 'static')
+    const res = await app.request('http://localhost/about/index.html')
+
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe('/')
+    expect(res.headers.get('cache-control')).toBe(ARCHIVE_CACHE_CONTROL)
   })
 })

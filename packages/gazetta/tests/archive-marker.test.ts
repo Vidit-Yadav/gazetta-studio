@@ -42,6 +42,36 @@ describe('archiveMarker (emit)', () => {
     )
     expect(archiveMarker({ kind: 'alias', target: 'old-page' })).toBe('<!-- gazetta:archived alias=old-page -->\n')
   })
+
+  it('rejects absolute and protocol-relative targets', () => {
+    expect(() => archiveMarker({ kind: 'alias', target: '/evil.example' })).toThrow(/relative/)
+    expect(() => archiveMarker({ kind: 'alias', target: '//evil.example' })).toThrow(/relative/)
+    expect(() => archiveMarker({ kind: 'alias', target: '\\evil.example' })).toThrow(/relative/)
+    expect(() => archiveMarker({ kind: 'alias', target: 'docs\\page' })).toThrow(/relative/)
+  })
+
+  it('rejects query, fragment, and traversal segments', () => {
+    expect(() => archiveMarker({ kind: 'alias', target: 'page?x=1' })).toThrow(/relative/)
+    expect(() => archiveMarker({ kind: 'alias', target: 'page#top' })).toThrow(/relative/)
+    expect(() => archiveMarker({ kind: 'alias', target: '../page' })).toThrow(/path segments/)
+    expect(() => archiveMarker({ kind: 'alias', target: 'docs//page' })).toThrow(/path segments/)
+  })
+
+  it('keeps the emitted marker within the 200-byte inspection window', () => {
+    const maxTarget = 'a'.repeat(168)
+    expect(parseArchiveMarker(archiveMarker({ kind: 'alias', target: maxTarget }))).toEqual({
+      kind: 'alias',
+      target: maxTarget,
+    })
+    expect(() => archiveMarker({ kind: 'alias', target: 'a'.repeat(169) })).toThrow(/inspection window/)
+
+    const unicodeTarget = 'é'.repeat(84)
+    expect(parseArchiveMarker(archiveMarker({ kind: 'alias', target: unicodeTarget }))).toEqual({
+      kind: 'alias',
+      target: unicodeTarget,
+    })
+    expect(() => archiveMarker({ kind: 'alias', target: 'é'.repeat(85) })).toThrow(/inspection window/)
+  })
 })
 
 describe('parseArchiveMarker', () => {
@@ -101,10 +131,16 @@ describe('parseArchiveMarker', () => {
   })
 
   it('reads only the first 200 bytes (workers do bounded range reads)', () => {
-    // A marker beyond byte 200 is invisible by design — worker fetches
+    // A marker beyond byte 200 is invisible by design �?" worker fetches
     // a 200-byte range to keep the per-request cost cheap. Filler
     // pushes the marker past the budget.
     const filler = '<!doctype html>'.repeat(20) // ~300 bytes
+    const input = filler + '<!-- gazetta:archived alias=welcome -->'
+    expect(parseArchiveMarker(input)).toBeNull()
+  })
+
+  it('measures the 200-byte window in bytes, not UTF-16 code units', () => {
+    const filler = 'é'.repeat(150) // 300 bytes, 150 code units
     const input = filler + '<!-- gazetta:archived alias=welcome -->'
     expect(parseArchiveMarker(input)).toBeNull()
   })

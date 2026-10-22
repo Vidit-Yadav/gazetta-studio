@@ -15,11 +15,13 @@ import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
 import { renderArchiveMarker } from '../src/publish-renderers.js'
 
+const validAlias = fc.stringMatching(/^[A-Za-z0-9_-]{1,40}(?:\/[A-Za-z0-9_-]{1,40}){0,2}$/)
+
 describe('renderArchiveMarker — properties', () => {
   it('always emits archived: true', () => {
     fc.assert(
       fc.property(
-        fc.option(fc.stringMatching(/^[A-Za-z0-9_./-]{1,50}$/), { nil: undefined }),
+        fc.option(validAlias, { nil: undefined }),
         fc.option(fc.string({ minLength: 0, maxLength: 30 }), { nil: undefined }),
         (aliasOf, locale) => {
           const out = renderArchiveMarker({ aliasOf: aliasOf ?? undefined }, locale ?? undefined)
@@ -31,7 +33,7 @@ describe('renderArchiveMarker — properties', () => {
 
   it('always emits zero hashed files (archive body is single line)', () => {
     fc.assert(
-      fc.property(fc.option(fc.stringMatching(/^[A-Za-z0-9_./-]{1,50}$/), { nil: undefined }), aliasOf => {
+      fc.property(fc.option(validAlias, { nil: undefined }), aliasOf => {
         const out = renderArchiveMarker({ aliasOf: aliasOf ?? undefined })
         expect(out.files).toHaveLength(0)
       }),
@@ -40,20 +42,16 @@ describe('renderArchiveMarker — properties', () => {
 
   it('marker fits in first 200 bytes (worker contract)', () => {
     fc.assert(
-      fc.property(
-        // alias targets max out at 200 chars (CONTEXT.md path discipline)
-        fc.option(fc.stringMatching(/^[A-Za-z0-9_./-]{1,100}$/), { nil: undefined }),
-        aliasOf => {
-          const out = renderArchiveMarker({ aliasOf: aliasOf ?? undefined })
-          expect(out.indexHtml.length).toBeLessThanOrEqual(200)
-        },
-      ),
+      fc.property(fc.option(fc.stringMatching(/^[A-Za-z0-9_-]{1,168}$/), { nil: undefined }), aliasOf => {
+        const out = renderArchiveMarker({ aliasOf: aliasOf ?? undefined })
+        expect(out.indexHtml.length).toBeLessThanOrEqual(200)
+      }),
     )
   })
 
   it('alias-form always contains "alias=" + the target', () => {
     fc.assert(
-      fc.property(fc.stringMatching(/^[A-Za-z0-9_./-]{1,50}$/), aliasOf => {
+      fc.property(validAlias, aliasOf => {
         const out = renderArchiveMarker({ aliasOf })
         expect(out.indexHtml).toContain('alias=')
         expect(out.indexHtml).toContain(aliasOf)
@@ -81,7 +79,7 @@ describe('renderArchiveMarker — properties', () => {
 
   it('absent locale → unsuffixed index.html', () => {
     fc.assert(
-      fc.property(fc.option(fc.stringMatching(/^[A-Za-z0-9_./-]{1,30}$/), { nil: undefined }), aliasOf => {
+      fc.property(fc.option(validAlias, { nil: undefined }), aliasOf => {
         const out = renderArchiveMarker({ aliasOf: aliasOf ?? undefined })
         expect(out.indexFile).toBe('index.html')
       }),

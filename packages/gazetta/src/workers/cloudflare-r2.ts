@@ -26,7 +26,9 @@
 
 import { Hono } from 'hono'
 import { assembleEsi, parseCacheComment, splitFragment, findEsiPaths } from '../assemble.js'
-import { archiveResponse } from '../runtime/archive-response.js'
+import { ArchivedNoAliasError } from '../archive-helpers.js'
+import { parseArchiveMarker } from '../runtime/archive-marker.js'
+import { archiveGoneResponse, archiveResponse } from '../runtime/archive-response.js'
 
 export interface CloudflareR2WorkerOptions {
   /** R2 bucket binding name (default: 'SITE_BUCKET') */
@@ -56,19 +58,69 @@ function extractLocale(requestPath: string, locales: string[]): { locale: string
 // Fragment fetching with locale fallback (SRP)
 // ---------------------------------------------------------------------------
 
-async function fetchFragment(bucket: R2Bucket, path: string): Promise<[string, { head: string; body: string }]> {
+interface FragmentParts {
+  head: string
+  body: string
+}
+
+const MAX_FRAGMENT_ALIAS_HOPS = 5
+
+function fragmentName(path: string): string {
+  return path.replace(/^\/?fragments\//, '').replace(/\/index(?:\.[a-z-]+)?\.html$/, '')
+}
+
+function aliasFragmentPath(path: string, target: string): string | null {
+  if (!target || target.startsWith('/') || target.includes('\\') || /[?#]/.test(target)) return null
+  if (target.split('/').some(part => part === '' || part === '.' || part === '..')) return null
+  const indexFile = path.slice(path.lastIndexOf('/') + 1)
+  return `/fragments/${target}/${indexFile}`
+}
+
+async function readFragmentHtml(bucket: R2Bucket, path: string): Promise<string | null> {
   const key = path.slice(1)
   const obj = await bucket.get(key)
-  if (obj) return [path, splitFragment(await obj.text())]
+  if (obj) return obj.text()
 
   // Locale fallback: index.fr.html → index.html
   const localeFallback = key.replace(/\/index\.[a-z-]+\.html$/, '/index.html')
   if (localeFallback !== key) {
     const fallbackObj = await bucket.get(localeFallback)
-    if (fallbackObj) return [path, splitFragment(await fallbackObj.text())]
+    if (fallbackObj) return fallbackObj.text()
   }
 
-  return [path, { head: '', body: `<!-- fragment not found: ${path} -->` }]
+  return null
+}
+
+async function fetchFragment(bucket: R2Bucket, path: string): Promise<[string, FragmentParts]> {
+  const visited = new Set<string>()
+  let currentPath = path
+
+  for (let hop = 0; hop <= MAX_FRAGMENT_ALIAS_HOPS; hop++) {
+    if (visited.has(currentPath)) throw new ArchivedNoAliasError(fragmentName(path))
+    visited.add(currentPath)
+
+    const html = await readFragmentHtml(bucket, currentPath)
+    if (html === null) return [path, { head: '', body: `<!-- fragment not found: ${path} -->` }]
+
+    const marker = parseArchiveMarker(html)
+    if (!marker) return [path, splitFragment(html)]
+    if (marker.kind === 'gone') throw new ArchivedNoAliasError(fragmentName(currentPath))
+
+    const nextPath = aliasFragmentPath(currentPath, marker.target)
+    if (!nextPath) throw new ArchivedNoAliasError(fragmentName(currentPath))
+    currentPath = nextPath
+  }
+
+  throw new ArchivedNoAliasError(fragmentName(path))
+}
+
+async function fetchFragmentEntries(bucket: R2Bucket, html: string): Promise<Map<string, FragmentParts> | Response> {
+  try {
+    return new Map(await Promise.all(findEsiPaths(html).map(p => fetchFragment(bucket, p))))
+  } catch (err) {
+    if (err instanceof ArchivedNoAliasError) return archiveGoneResponse()
+    throw err
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +214,7 @@ export function createWorker(options?: CloudflareR2WorkerOptions) {
   })
 
   // Static assets (CSS, JS) — immutable cache
-  app.get('/pages/*', async c => serveStatic(c, c.env[bindingName]))
+  app.get('/pages/*', async c => serveStatic(c, c.env[bindingName], true))
   app.get('/fragments/*', async c => serveStatic(c, c.env[bindingName]))
 
   // Page serving with ESI assembly + Cache API
@@ -179,22 +231,30 @@ export function createWorker(options?: CloudflareR2WorkerOptions) {
     const result = await findPage(bucket, requestPath, locales)
     if (!result) {
       const notFound = await findPage(bucket, '/404')
-      if (notFound) {
+      if (notFound && !archiveResponse(notFound.html)) {
         const { html: raw404 } = parseCacheComment(notFound.html)
-        const fragEntries = await Promise.all(findEsiPaths(raw404).map(p => fetchFragment(bucket, p)))
-        return c.html(assembleEsi(raw404, new Map(fragEntries)), 404)
+        const fragEntries = await fetchFragmentEntries(bucket, raw404)
+        if (fragEntries instanceof Response) return fragEntries
+        return c.html(assembleEsi(raw404, fragEntries), 404)
       }
       return c.html('<h1>404 — Page not found</h1>', 404)
     }
 
     const archived = archiveResponse(result.html)
-    if (archived) return archived
+    if (archived) {
+      c.executionCtx.waitUntil(cache.put(request, archived.clone()))
+      return archived
+    }
 
     const { html: rawHtml, browser, edge } = parseCacheComment(result.html)
 
     // Read all fragments in parallel (with locale fallback)
-    const fragEntries = await Promise.all(findEsiPaths(rawHtml).map(p => fetchFragment(bucket, p)))
-    const assembled = assembleEsi(rawHtml, new Map(fragEntries))
+    const fragEntries = await fetchFragmentEntries(bucket, rawHtml)
+    if (fragEntries instanceof Response) {
+      c.executionCtx.waitUntil(cache.put(request, fragEntries.clone()))
+      return fragEntries
+    }
+    const assembled = assembleEsi(rawHtml, fragEntries)
 
     // Compute ETag
     const encoder = new TextEncoder()
@@ -224,13 +284,26 @@ export function createWorker(options?: CloudflareR2WorkerOptions) {
   return app
 }
 
-async function serveStatic(c: any, bucket: R2Bucket) {
+async function serveStatic(c: any, bucket: R2Bucket, checkArchive = false) {
   const path = new URL(c.req.url).pathname.slice(1)
   const obj = await bucket.get(path)
   if (!obj) return c.notFound()
 
   const ext = path.split('.').pop()
   const contentType = ext === 'css' ? 'text/css' : ext === 'js' ? 'text/javascript' : 'text/html'
+
+  if (checkArchive && ext === 'html') {
+    const html = await obj.text()
+    const archived = archiveResponse(html)
+    if (archived) return archived
+    return new Response(html, {
+      headers: {
+        'Content-Type': contentType,
+        'Cache-Control': 'public, max-age=31536000, immutable',
+      },
+    })
+  }
+
   return new Response(obj.body as ReadableStream, {
     headers: {
       'Content-Type': contentType,

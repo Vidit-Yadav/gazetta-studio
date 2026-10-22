@@ -16,7 +16,9 @@ import { logger } from 'hono/logger'
 import { createHash } from 'node:crypto'
 import type { StorageProvider, TargetType } from './types.js'
 import { assembleEsi, parseCacheComment, splitFragment, findEsiPaths } from './assemble.js'
-import { archiveResponse } from './runtime/archive-response.js'
+import { ArchivedNoAliasError } from './archive-helpers.js'
+import { parseArchiveMarker } from './runtime/archive-marker.js'
+import { archiveGoneResponse, archiveResponse } from './runtime/archive-response.js'
 
 export interface ServeOptions {
   storage: StorageProvider
@@ -91,21 +93,69 @@ interface FragmentParts {
   body: string
 }
 
-async function fetchFragment(storage: StorageProvider, path: string): Promise<[string, FragmentParts]> {
+const MAX_FRAGMENT_ALIAS_HOPS = 5
+
+function fragmentName(path: string): string {
+  return path.replace(/^\/?fragments\//, '').replace(/\/index(?:\.[a-z-]+)?\.html$/, '')
+}
+
+function aliasFragmentPath(path: string, target: string): string | null {
+  if (!target || target.startsWith('/') || target.includes('\\') || /[?#]/.test(target)) return null
+  if (target.split('/').some(part => part === '' || part === '.' || part === '..')) return null
+  const indexFile = path.slice(path.lastIndexOf('/') + 1)
+  return `/fragments/${target}/${indexFile}`
+}
+
+async function readFragmentHtml(storage: StorageProvider, path: string): Promise<string | null> {
   try {
-    return [path, splitFragment(await storage.readFile(path.slice(1)))]
+    return await storage.readFile(path.slice(1))
   } catch {
     // Locale fragment not found — fall back to default locale
     // e.g. /fragments/header/index.fr.html → /fragments/header/index.html
     const localeFallback = path.replace(/\/index\.[a-z-]+\.html$/, '/index.html')
     if (localeFallback !== path) {
       try {
-        return [path, splitFragment(await storage.readFile(localeFallback.slice(1)))]
+        return await storage.readFile(localeFallback.slice(1))
       } catch {
         /* fallback also missing */
       }
     }
-    return [path, { head: '', body: `<!-- fragment not found: ${path} -->` }]
+    return null
+  }
+}
+
+async function fetchFragment(storage: StorageProvider, path: string): Promise<[string, FragmentParts]> {
+  const visited = new Set<string>()
+  let currentPath = path
+
+  for (let hop = 0; hop <= MAX_FRAGMENT_ALIAS_HOPS; hop++) {
+    if (visited.has(currentPath)) throw new ArchivedNoAliasError(fragmentName(path))
+    visited.add(currentPath)
+
+    const html = await readFragmentHtml(storage, currentPath)
+    if (html === null) return [path, { head: '', body: `<!-- fragment not found: ${path} -->` }]
+
+    const marker = parseArchiveMarker(html)
+    if (!marker) return [path, splitFragment(html)]
+    if (marker.kind === 'gone') throw new ArchivedNoAliasError(fragmentName(currentPath))
+
+    const nextPath = aliasFragmentPath(currentPath, marker.target)
+    if (!nextPath) throw new ArchivedNoAliasError(fragmentName(currentPath))
+    currentPath = nextPath
+  }
+
+  throw new ArchivedNoAliasError(fragmentName(path))
+}
+
+async function fetchFragmentEntries(
+  storage: StorageProvider,
+  html: string,
+): Promise<Map<string, FragmentParts> | Response> {
+  try {
+    return new Map(await Promise.all(findEsiPaths(html).map(p => fetchFragment(storage, p))))
+  } catch (err) {
+    if (err instanceof ArchivedNoAliasError) return archiveGoneResponse()
+    throw err
   }
 }
 
@@ -219,6 +269,8 @@ export function createServer(options: ServeOptions) {
       } catch {
         try {
           const html = await storage.readFile(requestPath.slice(1))
+          const archived = archiveResponse(html)
+          if (archived) return archived
           return c.html(html)
         } catch {
           return c.html('<h1>404 — Page not found</h1>', 404)
@@ -253,7 +305,7 @@ export function createServer(options: ServeOptions) {
   })
 
   // Hashed CSS/JS — immutable cache
-  app.get('/pages/*', async c => serveAsset(c, storage))
+  app.get('/pages/*', async c => serveAsset(c, storage, true))
   app.get('/fragments/*', async c => serveAsset(c, storage))
 
   // Accept-Language detection — redirect unlocalized requests to best match
@@ -282,10 +334,11 @@ export function createServer(options: ServeOptions) {
     const result = await findPage(storage, requestPath, locales)
     if (!result) {
       const notFound = await findPage(storage, '/404')
-      if (notFound) {
+      if (notFound && !archiveResponse(notFound.html)) {
         const { html: raw404 } = parseCacheComment(notFound.html)
-        const fragEntries = await Promise.all(findEsiPaths(raw404).map(p => fetchFragment(storage, p)))
-        return c.html(assembleEsi(raw404, new Map(fragEntries)), 404)
+        const fragEntries = await fetchFragmentEntries(storage, raw404)
+        if (fragEntries instanceof Response) return fragEntries
+        return c.html(assembleEsi(raw404, fragEntries), 404)
       }
       return c.html('<h1>404 — Page not found</h1>', 404)
     }
@@ -294,8 +347,9 @@ export function createServer(options: ServeOptions) {
     if (archived) return archived
 
     const { html: rawHtml, browser, edge } = parseCacheComment(result.html)
-    const fragEntries = await Promise.all(findEsiPaths(rawHtml).map(p => fetchFragment(storage, p)))
-    const html = assembleEsi(rawHtml, new Map(fragEntries))
+    const fragEntries = await fetchFragmentEntries(storage, rawHtml)
+    if (fragEntries instanceof Response) return fragEntries
+    const html = assembleEsi(rawHtml, fragEntries)
 
     const etag = `"${createHash('sha256').update(html).digest('hex').slice(0, 16)}"`
     if (c.req.header('If-None-Match') === etag) {
@@ -317,11 +371,15 @@ export function createServer(options: ServeOptions) {
   return app
 }
 
-async function serveAsset(c: any, storage: StorageProvider) {
+async function serveAsset(c: any, storage: StorageProvider, checkArchive = false) {
   const path = new URL(c.req.url).pathname.slice(1)
   try {
     const content = await storage.readFile(path)
     const ext = path.split('.').pop()
+    if (checkArchive && ext === 'html') {
+      const archived = archiveResponse(content)
+      if (archived) return archived
+    }
     const contentType = ext === 'css' ? 'text/css' : ext === 'js' ? 'text/javascript' : 'text/html'
     return new Response(content, {
       headers: {
