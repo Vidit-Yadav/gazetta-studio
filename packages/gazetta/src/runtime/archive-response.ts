@@ -34,10 +34,11 @@ export function archiveResponse(input: Uint8Array | string, options: ArchiveResp
   if (marker.kind === 'gone') return archiveGoneResponse()
 
   const route = deriveRoute(marker.target)
-  const localePrefix = options.locale
-    ? localeRoutePrefix(options.locale, {
-        supported: [options.locale],
-        default: options.defaultLocale ?? options.locale,
+  const requestLocale = options.locale ?? (options.defaultPrefix ? options.defaultLocale : undefined)
+  const localePrefix = requestLocale
+    ? localeRoutePrefix(requestLocale, {
+        supported: [requestLocale],
+        default: options.defaultLocale ?? requestLocale,
         defaultPrefix: options.defaultPrefix ?? false,
         detection: false,
         fallbacks: {},

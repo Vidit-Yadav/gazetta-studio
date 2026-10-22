@@ -50,6 +50,15 @@ describe('archiveResponse', () => {
     expect(res.headers.get('location')).toBe('/about')
   })
 
+  it('prefixes unprefixed requests when defaultPrefix is enabled', () => {
+    const res = archiveResponse(archiveMarker({ kind: 'alias', target: 'about' }), {
+      defaultLocale: 'en',
+      defaultPrefix: true,
+    })!
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe('/en/about')
+  })
+
   it('returns 410 for a gone marker', () => {
     const res = archiveResponse(archiveMarker({ kind: 'gone' }))!
     expect(res.status).toBe(410)
