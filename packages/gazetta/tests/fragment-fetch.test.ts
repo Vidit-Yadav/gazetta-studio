@@ -49,6 +49,15 @@ describe('fetchFragment', () => {
     expect(parts.body).toBe('<!-- fragment archived: @promo -->')
   })
 
+  it('omits a fragment with an unsafe alias target', async () => {
+    const [, parts] = await fetchFragment(
+      reader({ '/fragments/promo/index.html': '<!-- gazetta:archived alias=../promo -->\n' }),
+      '/fragments/promo/index.html',
+    )
+
+    expect(parts.body).toBe('<!-- fragment archived: @promo -->')
+  })
+
   it('keeps the existing not-found placeholder for a missing fragment', async () => {
     const [, parts] = await fetchFragment(reader({}), '/fragments/missing/index.html')
 
