@@ -126,7 +126,7 @@ describe('History on save', () => {
 
     // First recordWrite emits a baseline revision (the scan) plus the
     // delta revision — so "undo my first save" has a prior state to
-    // roll back to. IDs are timestamp-based (rev-<unixMillis>) so we
+    // roll back to. IDs are timestamp-based (rev-<unixMillis>-<seq>-<suffix>) so we
     // read them from the index rather than hard-coding.
     const indexPath = resolve(contentDir, '.gazetta/history/index.json')
     const index = JSON.parse(await readFile(indexPath, 'utf-8'))
@@ -328,8 +328,8 @@ describe('History HTTP endpoints', () => {
     const body = (await res.json()) as { revisions: { id: string; operation: string; message?: string }[] }
     // Baseline + 3 saves = 4 revisions, newest first.
     expect(body.revisions).toHaveLength(4)
-    // All ids follow the rev-<unixMillis>[-seq] shape.
-    for (const r of body.revisions) expect(r.id).toMatch(/^rev-\d{10,}(?:-\d+)?$/)
+    // Ids follow rev-<unixMillis>-<seq>-<suffix>; legacy rev-<unixMillis>[-seq] also matches.
+    for (const r of body.revisions) expect(r.id).toMatch(/^rev-\d{10,}(?:-\d+)?(?:-[0-9a-f]{8})?$/)
     // Newest-first ordering: id list in reverse-chrono (lex-desc).
     expect(body.revisions.map(r => r.id)).toEqual([...body.revisions.map(r => r.id)].sort().reverse())
     // Oldest entry is the baseline with its sentinel message.

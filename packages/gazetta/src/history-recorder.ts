@@ -118,7 +118,7 @@ export async function recordWrite(opts: RecordWriteOptions) {
   // pre-write state — so "undo my first save" has something to revert
   // to (the tree as it was before the CMS touched it). Subsequent
   // writes overlay deltas onto the previous revision. Without this,
-  // rev-0001 would be post-save state and undo would have no earlier
+  // the first revision would be post-save state and undo would have no earlier
   // revision to restore.
   const existing = await opts.history.listRevisions(1)
   if (existing.length === 0) {

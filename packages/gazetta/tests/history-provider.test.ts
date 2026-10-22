@@ -16,8 +16,8 @@ function input(items: Record<string, string>, overrides: Partial<RevisionInput> 
   }
 }
 
-/** Revision id matcher: `rev-<unixMillis>` or `rev-<unixMillis>-<seq>`. */
-const ID_SHAPE = /^rev-\d{10,}(?:-\d+)?$/
+/** Revision id matcher: `rev-<unixMillis>-<seq>-<suffix>`, plus the legacy `rev-<unixMillis>` / `rev-<unixMillis>-<seq>` forms. */
+const ID_SHAPE = /^rev-\d{10,}(?:-\d+)?(?:-[0-9a-f]{8})?$/
 
 describe('createHistoryProvider', () => {
   let storage: ReturnType<typeof memoryStorage>
@@ -26,7 +26,7 @@ describe('createHistoryProvider', () => {
   })
 
   describe('recordRevision', () => {
-    it('assigns timestamp-based ids (rev-<unixMillis>[-seq])', async () => {
+    it('assigns timestamp-based ids (rev-<unixMillis>-<seq>-<suffix>)', async () => {
       const h = createHistoryProvider({ storage })
       const r1 = await h.recordRevision(input({ 'pages/home': 'a' }))
       const r2 = await h.recordRevision(input({ 'pages/home': 'b' }))

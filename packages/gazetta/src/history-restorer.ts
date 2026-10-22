@@ -30,7 +30,7 @@ export interface RestoreRevisionOptions {
   history: HistoryProvider
   /** Content root of the target — destination for the restore writes. */
   contentRoot: ContentRoot
-  /** Id of the revision to restore to (rev-NNNN). */
+  /** Id of the revision to restore to (see `formatId` for the id scheme). */
   revisionId: string
   /** Free-form author identifier passed to the forward revision. */
   author?: string

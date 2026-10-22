@@ -77,6 +77,8 @@ For `structural` mode, the line reads `Runtime exercise: N/A — <reason>`. That
 
 **Test-only PRs** (tests or test fixtures, no product code): the bot's red-then-green shows only that the new test needs what the PR adds. Put back the bug the test exists for and confirm the test fails. (2026-10-20, #1021: the e2e spec failed without its new fixture field; undoing #981's fix showed it also catches the bug it was written for.) If the PR changes a fixture every e2e test uses, also search the other tests for waits on what it adds, per `testing-plan.md`: #1021 passed that check above and its own CI, and was still reverted (#1031) for breaking other tests' waits.
 
+**Tests that something still works** (green before and after the fix): the bot's red-then-green says nothing about them, and they can pass when nothing happened. On #1103 a test checked that `save()` returned true, which it also does with nothing pending, so it passed without the draft being written. On #1104, "the cleanup list grew" passed even when the wrong folder was added. Break the code path such a test covers (skip the write, add the wrong folder) and confirm it fails. If it still passes, ask for a check on the result itself: the write made, the folder gone.
+
 **Discovered**: each entry is a candidate follow-up issue. The bot intentionally surfaces these instead of widening scope. Treat them as input to the "Follow-up issues" workflow below.
 
 ### Anti-patterns to catch
@@ -184,6 +186,7 @@ Sourcery reviews every PR, drafts included; Sentry Seer reviews a PR once it's m
 
 - **A finding about code the diff doesn't touch is a follow-up candidate, not noise.** On #1017, Sourcery said translated pages are published with the default page's cache headers, in code #1017 didn't change. Reproducing it showed their title, description and ESI component list were wrong too (#1024).
 - **Compare a finding about the fix with the linked issue's Expected section.** If the issue asked for it, the fix is incomplete (see "Anti-patterns to catch"). If the issue's own notes left it out, file a follow-up. Seer showed #1016's Discard missed drafts restored after a reload, which #980's notes hadn't mentioned (#1025).
+- **Check a finding against the PR's head, not the commit it's attached to.** Seer's comment on #1101 was attached to the commit that moved the cache out of `/tmp`, but it described the `/tmp` code from the commit before. Before replying, check whether the head still has the problem; if not, reply with the commit that fixed it.
 - **Record the outcome.** React 👍 or 👎 (Sourcery learns from reactions), reply with what you did or the follow-up issue, and add a row to the audit doc's trial log while the trial runs.
 
 ## Stacked-PR detection

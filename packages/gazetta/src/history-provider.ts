@@ -4,8 +4,8 @@
  * Layout per target (inside `.gazetta/history/` under the target's
  * storage root):
  *
- *   index.json                     { revisions: ['rev-0001', ...] }
- *   revisions/rev-NNNN.json        one manifest per revision — metadata +
+ *   index.json                     { revisions: ['rev-<ms>-1-a1b2c3d4', ...] }
+ *   revisions/<id>.json            one manifest per revision — metadata +
  *                                  items map (itemPath → blob hash)
  *   objects/<hh>/<rest>            content-addressed blobs (SHA-256, sharded
  *                                  by first 2 hex chars)
@@ -23,7 +23,7 @@
  * this module doesn't touch the content tree.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { rmIgnoreMissing } from './providers/_rm-ignore-missing.js'
 import type { StorageProvider } from './types.js'
 import type { BlobContent, HistoryProvider, Revision, RevisionInput, RevisionManifest } from './history.js'
@@ -52,7 +52,7 @@ export interface CreateHistoryProviderOptions {
  * heavy and read-cheap, so we serialize the full ordered id list
  * rather than try to be clever. Oldest first, newest last.
  *
- * IDs are timestamp-based (`rev-<unixMillis>[-<seq>]`) so retention
+ * IDs are timestamp-based (`rev-<unixMillis>-<seq>-<suffix>`) so retention
  * evictions stay auditable ("what happened around Jan 5?") and lex-
  * sort matches chronological order. See `formatId` for the full scheme.
  */
@@ -134,20 +134,21 @@ export function createHistoryProvider(opts: CreateHistoryProviderOptions): Histo
    * delete into an arbitrary-file delete inside the storage root. Reject
    * anything outside the generated shape at the public boundary.
    */
-  const REVISION_ID_PATTERN = /^rev-\d+(?:-\d+)?$/
+  const REVISION_ID_PATTERN = /^rev-\d+(?:-\d+)?(?:-[0-9a-f]{8})?$/
   const isRevisionId = (id: string): boolean => REVISION_ID_PATTERN.test(id)
 
   /**
    * Chronological order key: timestamp first, then the NUMERIC same-
-   * millisecond sequence. A bare `rev-<ms>` is sequence 1 (`formatId`
-   * appends `-2` for the first collision), so a lexicographic sort would
-   * misorder `-10` before `-2` once one millisecond sees 10+ revisions.
-   * Non-matching names sort last, by name.
+   * millisecond sequence, then the random suffix. A bare `rev-<ms>` is
+   * sequence 1, so a lexicographic sort would misorder `-10` before `-2`
+   * once one millisecond sees 10+ revisions. Legacy ids (no suffix) sort
+   * before suffixed ids at the same (ms, seq): they predate the suffixed
+   * scheme. Non-matching names sort last, by name.
    */
   const revisionIdKey = (id: string): [number, number, string] => {
-    const m = /^rev-(\d+)(?:-(\d+))?$/.exec(id)
+    const m = /^rev-(\d+)(?:-(\d+))?(?:-([0-9a-f]{8}))?$/.exec(id)
     if (!m) return [Number.POSITIVE_INFINITY, 0, id]
-    return [Number(m[1]), m[2] ? Number(m[2]) : 1, '']
+    return [Number(m[1]), m[2] ? Number(m[2]) : 1, m[3] ?? '']
   }
   const compareRevisionIds = (a: string, b: string): number => {
     const [am, as, an] = revisionIdKey(a)
@@ -214,34 +215,40 @@ export function createHistoryProvider(opts: CreateHistoryProviderOptions): Histo
   }
 
   /**
-   * Allocate a fresh revision id. Scheme: `rev-<unixMillis>`, with a
-   * `-<seq>` suffix on same-millisecond collisions ("rev-1760...050",
-   * "rev-1760...050-2", ...). Collision tracking uses a FRESH revisions/
-   * listing, and the caller verifies the manifest write by read-back
-   * and retries on overwrite (no create-exclusive in the storage
-   * contract), so concurrent writers on one target end up with
-   * distinct ids (#1089).
+   * Allocate a fresh revision id. Scheme: `rev-<unixMillis>-<seq>-<suffix>`
+   * ("rev-1760...050-1-a1b2c3d4", ...). `seq` is the per-millisecond
+   * sequence from a FRESH revisions/ listing (starting at 1, so
+   * sequential writes in one millisecond keep their order); `suffix` is
+   * 8 random hex chars that keep concurrent writers apart without any
+   * coordination (#1112). Legacy ids (`rev-<ms>`, `rev-<ms>-<seq>`) still
+   * parse and sort - they count as sequence 1 / N for allocation.
    *
-   * Why millis + suffix rather than a monotonic counter:
+   * Why millis + random suffix rather than a monotonic counter:
    *   - Retention evictions leave you with a window of revisions you
    *     can date-read from the filename alone.
    *   - No counter to overflow or reset when history is disabled then
    *     re-enabled.
-   *   - Lex-sort = chrono sort (13-digit ms are fixed-width through
-   *     year 5138 AD).
+   *   - Two writers that list in the same millisecond pick the same seq
+   *     but different suffixes, so neither overwrites the other's file.
    *
    * `_clock` is injectable for deterministic tests — production uses
    * Date.now(). Stays private to createHistoryProvider.
    */
   function formatId(existing: readonly string[], now: number): string {
     const base = `rev-${now}`
-    if (!existing.some(id => id === base || id.startsWith(`${base}-`))) return base
-    // Same-millisecond collision: bump the suffix. Start from 2 so the
-    // first duplicate gets `-2` (matches the mental model "base, then
-    // the second, then the third").
-    let seq = 2
-    while (existing.includes(`${base}-${seq}`)) seq += 1
-    return `${base}-${seq}`
+    // Next sequence for this millisecond. A bare `rev-<ms>` is sequence 1;
+    // `rev-<ms>-N` and `rev-<ms>-N-<suffix>` are sequence N.
+    let seq = 1
+    for (const id of existing) {
+      if (id === base) {
+        seq = Math.max(seq, 2)
+        continue
+      }
+      if (!id.startsWith(`${base}-`)) continue
+      const rest = Number(id.slice(base.length + 1).split('-')[0])
+      if (Number.isFinite(rest)) seq = Math.max(seq, rest + 1)
+    }
+    return `${base}-${seq}-${randomBytes(4).toString('hex')}`
   }
 
   /**
@@ -277,38 +284,26 @@ export function createHistoryProvider(opts: CreateHistoryProviderOptions): Histo
       snapshot[path] = await writeBlob(content)
     }
 
-    // Allocate the id against a FRESH listing, write the manifest, then
-    // read it back: with no create-exclusive write in the storage
-    // contract, two writers in the same millisecond can pick the same
-    // id, and the later writeFile would silently overwrite the earlier
-    // manifest. The loser detects the overwrite on read-back and
-    // retries against a fresh listing (which by then includes the
-    // winner's id, so the seq suffix diverges). Converges unless the
-    // pair stays write-locked in sync; bounded, then throws (#1089).
-    let id = ''
-    let manifest: RevisionManifest | null = null
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      id = formatId(await listRevisionIds(), Date.now())
-      manifest = {
-        id,
-        timestamp: new Date().toISOString(),
-        operation: input.operation,
-        author: input.author,
-        source: input.source,
-        items: [...input.items.keys()].sort(),
-        message: input.message,
-        restoredFrom: input.restoredFrom,
-        snapshot,
-      }
-      const json = JSON.stringify(manifest, null, 2) + '\n'
-      await writeWithParents(revisionPath(id), json)
-      const written = await storage.readFile(revisionPath(id)).catch(() => null)
-      if (written === json) break
-      manifest = null
+    // Allocate the id against a FRESH listing, then write the manifest
+    // once. Ids carry a random suffix (see formatId), so two writers that
+    // list in the same millisecond pick different filenames and neither
+    // overwrites the other's manifest - no read-back or retry loop is
+    // needed even without a create-exclusive write in the storage
+    // contract (#1112).
+    const id = formatId(await listRevisionIds(), Date.now())
+    const manifest: RevisionManifest = {
+      id,
+      timestamp: new Date().toISOString(),
+      operation: input.operation,
+      author: input.author,
+      source: input.source,
+      items: [...input.items.keys()].sort(),
+      message: input.message,
+      restoredFrom: input.restoredFrom,
+      snapshot,
     }
-    if (manifest === null) {
-      throw new Error('recordRevision: revision id kept colliding under concurrent writes')
-    }
+    const json = JSON.stringify(manifest, null, 2) + '\n'
+    await writeWithParents(revisionPath(id), json)
 
     // Refresh the index cache, then apply retention. The manifest is
     // already durable at this point, and the listing - not the cache -

@@ -12,7 +12,7 @@
  *     history/
  *       index.json              ordered revision list
  *       objects/<hh>/<rest>     content-addressed blobs, sharded by first 2 hex chars
- *       revisions/rev-NNNN.json revision manifest: metadata + item→hash map
+ *       revisions/<id>.json    revision manifest: metadata + item→hash map
  *
  * One uniform approach across all storage providers — the provider
  * interface remains read/write bytes at paths; no provider-native
@@ -27,7 +27,7 @@ export type RevisionOperation = 'save' | 'publish' | 'rollback'
 
 /** Metadata + item→hash snapshot for one write to a target. */
 export interface Revision {
-  /** Unique id, typically `rev-{NNNN}` with a zero-padded counter. */
+  /** Unique id: `rev-<unixMillis>-<seq>-<suffix>` (legacy: `rev-<ms>` or `rev-<ms>-<seq>`). */
   id: string
   /** ISO 8601 timestamp when the revision was recorded. */
   timestamp: string
@@ -45,7 +45,7 @@ export interface Revision {
   restoredFrom?: string
 }
 
-/** Full revision manifest as stored in `revisions/rev-NNNN.json`. */
+/** Full revision manifest as stored in `revisions/<id>.json`. */
 export interface RevisionManifest extends Revision {
   /**
    * Snapshot of the full content tree at this revision, as `path → content hash`.
@@ -105,7 +105,7 @@ export interface HistoryProvider {
    * Record a new revision on the target.
    *
    * Writes any new item blobs to `objects/<hash[:2]>/<hash[2:]>`, writes
-   * the revision manifest to `revisions/rev-NNNN.json`, updates
+   * the revision manifest to `revisions/<id>.json`, updates
    * `index.json`, and applies retention (evicts oldest if over limit).
    *
    * `items` parameter carries the full content tree; only blobs that

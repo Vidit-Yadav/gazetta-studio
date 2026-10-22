@@ -42,7 +42,10 @@ function run(args: string[]): { stdout: string; stderr: string; status: number |
 }
 
 describe('gazetta validate (CLI)', () => {
-  it('runs against starter and reports each page + fragment', () => {
+  // Every test here spawns the built CLI; the default 5s vitest timeout is
+  // too tight under CI parallelism (~2s local, up to ~12s observed on loaded
+  // runners), so all of them use the quality test's 30s override.
+  it('runs against starter and reports each page + fragment', { timeout: 30_000 }, () => {
     const { stdout, status } = run(['sites/main', '--severity', 'error'])
     expect(stdout).toMatch(/site\.config\.ts/)
     expect(stdout).toMatch(/home/)
@@ -53,7 +56,7 @@ describe('gazetta validate (CLI)', () => {
     expect([0, 1]).toContain(status)
   })
 
-  it('--severity all surfaces the schema-conformance warning on 404', () => {
+  it('--severity all surfaces the schema-conformance warning on 404', { timeout: 30_000 }, () => {
     const { stdout } = run(['sites/main', '--severity', 'all', '--verbose'])
     // The starter's `404` page lacks a `heading` field; schema-conformance
     // surfaces this. If the starter is later cleaned up, drop this test
@@ -61,20 +64,17 @@ describe('gazetta validate (CLI)', () => {
     expect(stdout).toMatch(/heading/)
   })
 
-  it('--no-warn-as-error returns exit 0 even when warns present', () => {
+  it('--no-warn-as-error returns exit 0 even when warns present', { timeout: 30_000 }, () => {
     const { status } = run(['sites/main', '--severity', 'all', '--no-warn-as-error'])
     expect(status).toBe(0)
   })
 
-  it('--verbose prints full Issue messages', () => {
+  it('--verbose prints full Issue messages', { timeout: 30_000 }, () => {
     const { stdout } = run(['sites/main', '--severity', 'all', '--verbose'])
     // Verbose surfaces individual issue lines indented under the item.
     expect(stdout).toMatch(/Invalid input|expected string|received undefined/)
   })
 
-  // Quality validators (axe-core + html-validate) are CPU-bound; the default
-  // 5s vitest timeout is too tight under CI parallelism (~2s local, up to ~12s
-  // observed on loaded runners).
   it('--include-quality runs without crashing (a11y + html-validity engaged)', { timeout: 30_000 }, () => {
     // Verifies the wiring; doesn't make claims about what these validators
     // surface on the starter (some violations are normal on real templates).

@@ -26,7 +26,7 @@
  * path (other tests do that); they verify the claimed failure-mode
  * invariants.
  */
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { createHistoryProvider } from '../src/history-provider.js'
 import { type MemoryStorage, memoryStorage } from './_helpers/memory-storage.js'
 
@@ -372,5 +372,113 @@ describe('history fault injection — recovery invariant', () => {
     })
     expect(rev.id).toBeDefined()
     await assertIndexPointsAtReadableManifests(history)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Concurrent writers (#1112)
+// ---------------------------------------------------------------------------
+
+/**
+ * Storage decorator that forces the lost-revision interleaving from #1112:
+ * both writers check/list revisions/ BEFORE either writes its manifest, so
+ * their `formatId` calls see the same listing. The first matching `exists`
+ * waits for the second to arrive (a two-party rendezvous, capped at the
+ * first two calls so later listings pass straight through).
+ */
+function withRendezvousList(inner: MemoryStorage): MemoryStorage {
+  let waiting: (() => void) | null = null
+  let gated = 0
+  return {
+    ...inner,
+    async exists(path: string) {
+      if (path.endsWith('/revisions') && gated < 2) {
+        gated += 1
+        if (waiting === null) {
+          await new Promise<void>(resolve => {
+            waiting = resolve
+          })
+        } else {
+          const release = waiting
+          waiting = null
+          release()
+        }
+      }
+      return inner.exists(path)
+    },
+  }
+}
+
+describe('concurrent recordRevision (#1112)', () => {
+  let storage: MemoryStorage
+  beforeEach(() => {
+    storage = memoryStorage()
+  })
+
+  it('two writers listing in the same millisecond both keep their revision', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_760_000_000_000)
+    try {
+      const gated = withRendezvousList(storage)
+      const a = createHistoryProvider({ storage: gated })
+      const b = createHistoryProvider({ storage: gated })
+      const [ra, rb] = await Promise.all([
+        a.recordRevision({ operation: 'save', items: new Map([['pages/home', 'from A']]) }),
+        b.recordRevision({ operation: 'save', items: new Map([['pages/home', 'from B']]) }),
+      ])
+      // Distinct filenames: neither manifest overwrote the other.
+      expect(ra.id).not.toBe(rb.id)
+      const ids = (await a.listRevisions()).map(r => r.id)
+      expect(ids).toContain(ra.id)
+      expect(ids).toContain(rb.id)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('two sequential writes in one millisecond list in the order written', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_760_000_000_000)
+    try {
+      const h = createHistoryProvider({ storage })
+      const r1 = await h.recordRevision({ operation: 'save', items: new Map([['pages/home', 'one']]) })
+      const r2 = await h.recordRevision({ operation: 'save', items: new Map([['pages/home', 'two']]) })
+      expect(r1.id).toMatch(/^rev-1760000000000-1-[0-9a-f]{8}$/)
+      expect(r2.id).toMatch(/^rev-1760000000000-2-[0-9a-f]{8}$/)
+      // listRevisions is newest-first.
+      expect((await h.listRevisions()).map(r => r.id)).toEqual([r2.id, r1.id])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('legacy ids load and sort together with suffixed ids', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_760_000_000_000)
+    try {
+      const root = '.gazetta/history'
+      const legacyManifest = (id: string) =>
+        JSON.stringify(
+          { id, timestamp: new Date().toISOString(), operation: 'save', items: ['pages/home'], snapshot: {} },
+          null,
+          2,
+        ) + '\n'
+      await storage.writeFile(`${root}/revisions/rev-1760000000000.json`, legacyManifest('rev-1760000000000'))
+      await storage.writeFile(`${root}/revisions/rev-1760000000000-2.json`, legacyManifest('rev-1760000000000-2'))
+
+      const h = createHistoryProvider({ storage })
+      // The next allocation continues the legacy sequence at the same ms.
+      const r = await h.recordRevision({ operation: 'save', items: new Map([['pages/home', 'new']]) })
+      expect(r.id).toMatch(/^rev-1760000000000-3-[0-9a-f]{8}$/)
+
+      // Newest first; legacy ids sort by (ms, numeric seq) before the new one.
+      expect((await h.listRevisions()).map(x => x.id)).toEqual([r.id, 'rev-1760000000000-2', 'rev-1760000000000'])
+
+      // Legacy ids still pass the public boundary validation.
+      const legacy = await h.readRevision('rev-1760000000000-2')
+      expect(legacy.id).toBe('rev-1760000000000-2')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

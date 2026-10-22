@@ -109,7 +109,10 @@ describe('gazetta history / undo / rollback', { timeout: 60000 }, () => {
     // Newest first: the "Edit 2" state is head; the `Initial baseline`
     // tag should appear AFTER the others in the output.
     const baselineAt = res.stdout.indexOf('Initial baseline')
-    const firstSaveAt = res.stdout.search(/rev-\d+\s+save\s+/)
+    const firstSaveAt = res.stdout.search(/rev-\d+(?:-\d+)?(?:-[0-9a-f]{8})?\s+save\s+/)
+    // search() returns -1 on no match, which would make the ordering
+    // assertion vacuous — require an actual save row first.
+    expect(firstSaveAt).toBeGreaterThanOrEqual(0)
     expect(baselineAt).toBeGreaterThan(firstSaveAt)
   })
 
@@ -144,7 +147,7 @@ describe('gazetta history / undo / rollback', { timeout: 60000 }, () => {
     // Grab the baseline id from the history command output — tests
     // shouldn't depend on internal file layout.
     const listRes = await runCli(projectDir, ['history', 'local', 'sites/main'])
-    const baselineMatch = listRes.stdout.match(/(rev-\d+)\s+save\s+.*Initial baseline/)
+    const baselineMatch = listRes.stdout.match(/(rev-\d+(?:-\d+)?(?:-[0-9a-f]{8})?)\s+save\s+.*Initial baseline/)
     expect(baselineMatch).toBeTruthy()
     const baselineId = baselineMatch![1]
 
