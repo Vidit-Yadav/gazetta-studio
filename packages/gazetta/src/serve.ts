@@ -16,6 +16,7 @@ import { logger } from 'hono/logger'
 import { createHash } from 'node:crypto'
 import type { StorageProvider, TargetType } from './types.js'
 import { assembleEsi, parseCacheComment, splitFragment, findEsiPaths } from './assemble.js'
+import { archiveResponse } from './runtime/archive-response.js'
 
 export interface ServeOptions {
   storage: StorageProvider
@@ -210,6 +211,8 @@ export function createServer(options: ServeOptions) {
       const filePath = requestPath === '/' ? 'index.html' : `${requestPath.replace(/\/$/, '')}/index.html`
       try {
         const html = await storage.readFile(filePath)
+        const archived = archiveResponse(html)
+        if (archived) return archived
         const etag = `"${createHash('sha256').update(html).digest('hex').slice(0, 16)}"`
         if (c.req.header('If-None-Match') === etag) return new Response(null, { status: 304, headers: { ETag: etag } })
         return c.html(html, 200, { 'Cache-Control': 'public, max-age=0, must-revalidate', ETag: etag })
@@ -286,6 +289,9 @@ export function createServer(options: ServeOptions) {
       }
       return c.html('<h1>404 — Page not found</h1>', 404)
     }
+
+    const archived = archiveResponse(result.html)
+    if (archived) return archived
 
     const { html: rawHtml, browser, edge } = parseCacheComment(result.html)
     const fragEntries = await Promise.all(findEsiPaths(rawHtml).map(p => fetchFragment(storage, p)))

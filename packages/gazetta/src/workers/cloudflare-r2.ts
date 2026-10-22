@@ -26,6 +26,7 @@
 
 import { Hono } from 'hono'
 import { assembleEsi, parseCacheComment, splitFragment, findEsiPaths } from '../assemble.js'
+import { archiveResponse } from '../runtime/archive-response.js'
 
 export interface CloudflareR2WorkerOptions {
   /** R2 bucket binding name (default: 'SITE_BUCKET') */
@@ -185,6 +186,9 @@ export function createWorker(options?: CloudflareR2WorkerOptions) {
       }
       return c.html('<h1>404 — Page not found</h1>', 404)
     }
+
+    const archived = archiveResponse(result.html)
+    if (archived) return archived
 
     const { html: rawHtml, browser, edge } = parseCacheComment(result.html)
 

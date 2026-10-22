@@ -8,7 +8,10 @@ import { mapLimit } from './concurrency.js'
 import { type ContentRoot, createContentRoot } from './content-root.js'
 import { localeFromFilename, localeRoutePrefix, resolveSiteLocales } from './locale.js'
 import { parseFragmentManifest, parsePageManifest } from './manifest.js'
+import { deriveRoute } from './runtime/derive-route.js'
 import type { FragmentManifest, PageManifest, SiteManifest, StorageProvider } from './types.js'
+
+export { deriveRoute }
 
 /** A page entry with its name, manifest, and optional locale. */
 export interface PageEntry {
@@ -42,12 +45,6 @@ export function allFragmentEntries(site: Site): FragmentEntry[] {
     for (const [locale, fragment] of entry.locales) entries.push({ name, fragment, locale })
   }
   return entries
-}
-
-/** Derive route from page folder name: home → /, about → /about, blog/[slug] → /blog/:slug */
-export function deriveRoute(pageName: string): string {
-  if (pageName === 'home') return '/'
-  return '/' + pageName.replace(/\[([^\]]+)\]/g, ':$1')
 }
 
 /** A page or fragment with its locale variants. */
