@@ -187,7 +187,7 @@ export function createServer(options: ServeOptions) {
   const { storage, type = 'dynamic', locales, defaultLocale, defaultPrefix, detection } = options
   const nonDefaultLocales = locales?.filter(l => l !== (defaultLocale ?? locales?.[0])) ?? []
   const archiveFor = (html: string, locale: string | undefined) =>
-    archiveResponse(html, { locale, defaultLocale, defaultPrefix })
+    archiveResponse(html, { locale, defaultLocale: defaultLocale ?? locales?.[0], defaultPrefix })
   const readFragment = (path: string) => readFragmentHtml(storage, path)
   const app = new Hono()
 

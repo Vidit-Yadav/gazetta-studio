@@ -185,6 +185,18 @@ describe('serve archive markers (localized)', () => {
     expect(res.headers.get('cache-control')).toBe(ARCHIVE_CACHE_CONTROL)
   })
 
+  it('falls back to the first locale when defaultLocale is omitted', async () => {
+    const seed = esiSeed()
+    seed['pages/about/index.fr.html'] = archiveMarker({ kind: 'alias', target: 'home' })
+    const storage = memoryStorage()
+    storage.seed(seed)
+    const app = createServer({ storage, type: 'dynamic', locales: ['en', 'fr'] })
+
+    const res = await app.request('http://localhost/fr/about')
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe('/fr')
+  })
+
   it('keeps the default-prefix locale on alias redirects', async () => {
     const seed = esiSeed()
     seed['pages/about/index.en.html'] = archiveMarker({ kind: 'alias', target: 'home' })

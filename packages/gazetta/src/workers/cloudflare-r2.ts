@@ -137,7 +137,7 @@ export function createWorker(options?: CloudflareR2WorkerOptions) {
   const defaultPrefix = options?.defaultPrefix
   const nonDefaultLocales = locales?.filter(l => l !== (defaultLocale ?? locales?.[0])) ?? []
   const archiveFor = (html: string, locale: string | undefined) =>
-    archiveResponse(html, { locale, defaultLocale, defaultPrefix })
+    archiveResponse(html, { locale, defaultLocale: defaultLocale ?? locales?.[0], defaultPrefix })
 
   const app = new Hono<{ Bindings: Record<string, R2Bucket> }>()
 

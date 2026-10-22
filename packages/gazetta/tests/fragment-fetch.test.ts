@@ -51,7 +51,10 @@ describe('fetchFragment', () => {
 
   it('omits a fragment with an unsafe alias target', async () => {
     const [, parts] = await fetchFragment(
-      reader({ '/fragments/promo/index.html': '<!-- gazetta:archived alias=../promo -->\n' }),
+      reader({
+        '/fragments/promo/index.html': '<!-- gazetta:archived alias=../promo -->\n',
+        '/fragments/../promo/index.html': '<body>Escaped the fragments tree</body>',
+      }),
       '/fragments/promo/index.html',
     )
 
