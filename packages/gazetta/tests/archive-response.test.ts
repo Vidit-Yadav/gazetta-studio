@@ -22,6 +22,34 @@ describe('archiveResponse', () => {
     expect(res.headers.get('location')).toBe('/caf%C3%A9')
   })
 
+  it('prefixes non-default locale routes', () => {
+    const res = archiveResponse(archiveMarker({ kind: 'alias', target: 'home' }), {
+      locale: 'fr',
+      defaultLocale: 'en',
+    })!
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe('/fr')
+  })
+
+  it('prefixes default locale routes when defaultPrefix is enabled', () => {
+    const res = archiveResponse(archiveMarker({ kind: 'alias', target: 'about' }), {
+      locale: 'en',
+      defaultLocale: 'en',
+      defaultPrefix: true,
+    })!
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe('/en/about')
+  })
+
+  it('leaves default locale routes unprefixed by default', () => {
+    const res = archiveResponse(archiveMarker({ kind: 'alias', target: 'about' }), {
+      locale: 'en',
+      defaultLocale: 'en',
+    })!
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe('/about')
+  })
+
   it('returns 410 for a gone marker', () => {
     const res = archiveResponse(archiveMarker({ kind: 'gone' }))!
     expect(res.status).toBe(410)

@@ -29,7 +29,7 @@ export function isArchived(manifest: { archived?: boolean }): boolean {
  *
  * The caller distinguishes "live" from "archived without alias" via
  * `isArchived(manifest)` — both states return null here, but the runtime
- * behavior differs (live = render normally; archived-no-alias = throw).
+ * behavior differs (live = render normally; archived-no-alias = omit or throw).
  */
 export function aliasTarget(manifest: { archived?: boolean; aliasOf?: string }): string | null {
   if (!isArchived(manifest)) return null
@@ -38,11 +38,11 @@ export function aliasTarget(manifest: { archived?: boolean; aliasOf?: string }):
 
 /**
  * Error thrown by `resolveFragmentArchiveAlias` when an archived fragment
- * has no `aliasOf` field. Caller (renderer / worker) decides UX:
+ * has no `aliasOf` field. Caller decides UX:
  *
  *   - Renderer: surface as render-time error (per Q2 F1 split)
  *   - Validator (P1): warn at save / background / pre-publish
- *   - Worker: emit 410 Gone on the page that referenced this fragment
+ *   - Web server: omit the fragment, leaving an HTML marker comment
  *
  * Distinct error class so callers can `instanceof`-check without
  * pattern-matching messages.

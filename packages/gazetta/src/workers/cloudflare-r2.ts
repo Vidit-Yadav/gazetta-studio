@@ -25,10 +25,9 @@
  */
 
 import { Hono } from 'hono'
-import { assembleEsi, parseCacheComment, splitFragment, findEsiPaths } from '../assemble.js'
-import { ArchivedNoAliasError } from '../archive-helpers.js'
-import { parseArchiveMarker } from '../runtime/archive-marker.js'
-import { archiveGoneResponse, archiveResponse } from '../runtime/archive-response.js'
+import { assembleEsi, parseCacheComment } from '../assemble.js'
+import { archiveResponse } from '../runtime/archive-response.js'
+import { fetchFragmentEntries } from '../runtime/fragment-fetch.js'
 
 export interface CloudflareR2WorkerOptions {
   /** R2 bucket binding name (default: 'SITE_BUCKET') */
@@ -37,6 +36,8 @@ export interface CloudflareR2WorkerOptions {
   locales?: string[]
   /** Default locale — no URL prefix. Falls back to first in `locales`. */
   defaultLocale?: string
+  /** When true, the default locale also gets a URL prefix (e.g. /en/about). */
+  defaultPrefix?: boolean
   /** Custom middleware to add before page serving */
   middleware?: (app: Hono<{ Bindings: Record<string, R2Bucket> }>) => void
 }
@@ -58,24 +59,6 @@ function extractLocale(requestPath: string, locales: string[]): { locale: string
 // Fragment fetching with locale fallback (SRP)
 // ---------------------------------------------------------------------------
 
-interface FragmentParts {
-  head: string
-  body: string
-}
-
-const MAX_FRAGMENT_ALIAS_HOPS = 5
-
-function fragmentName(path: string): string {
-  return path.replace(/^\/?fragments\//, '').replace(/\/index(?:\.[a-z-]+)?\.html$/, '')
-}
-
-function aliasFragmentPath(path: string, target: string): string | null {
-  if (!target || target.startsWith('/') || target.includes('\\') || /[?#]/.test(target)) return null
-  if (target.split('/').some(part => part === '' || part === '.' || part === '..')) return null
-  const indexFile = path.slice(path.lastIndexOf('/') + 1)
-  return `/fragments/${target}/${indexFile}`
-}
-
 async function readFragmentHtml(bucket: R2Bucket, path: string): Promise<string | null> {
   const key = path.slice(1)
   const obj = await bucket.get(key)
@@ -89,38 +72,6 @@ async function readFragmentHtml(bucket: R2Bucket, path: string): Promise<string 
   }
 
   return null
-}
-
-async function fetchFragment(bucket: R2Bucket, path: string): Promise<[string, FragmentParts]> {
-  const visited = new Set<string>()
-  let currentPath = path
-
-  for (let hop = 0; hop <= MAX_FRAGMENT_ALIAS_HOPS; hop++) {
-    if (visited.has(currentPath)) throw new ArchivedNoAliasError(fragmentName(path))
-    visited.add(currentPath)
-
-    const html = await readFragmentHtml(bucket, currentPath)
-    if (html === null) return [path, { head: '', body: `<!-- fragment not found: ${path} -->` }]
-
-    const marker = parseArchiveMarker(html)
-    if (!marker) return [path, splitFragment(html)]
-    if (marker.kind === 'gone') throw new ArchivedNoAliasError(fragmentName(currentPath))
-
-    const nextPath = aliasFragmentPath(currentPath, marker.target)
-    if (!nextPath) throw new ArchivedNoAliasError(fragmentName(currentPath))
-    currentPath = nextPath
-  }
-
-  throw new ArchivedNoAliasError(fragmentName(path))
-}
-
-async function fetchFragmentEntries(bucket: R2Bucket, html: string): Promise<Map<string, FragmentParts> | Response> {
-  try {
-    return new Map(await Promise.all(findEsiPaths(html).map(p => fetchFragment(bucket, p))))
-  } catch (err) {
-    if (err instanceof ArchivedNoAliasError) return archiveGoneResponse()
-    throw err
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +133,11 @@ async function findPage(
 export function createWorker(options?: CloudflareR2WorkerOptions) {
   const bindingName = options?.bucketBinding ?? 'SITE_BUCKET'
   const locales = options?.locales
-  const nonDefaultLocales = locales?.filter(l => l !== (options?.defaultLocale ?? locales?.[0])) ?? []
+  const defaultLocale = options?.defaultLocale
+  const defaultPrefix = options?.defaultPrefix
+  const nonDefaultLocales = locales?.filter(l => l !== (defaultLocale ?? locales?.[0])) ?? []
+  const archiveFor = (html: string, locale: string | undefined) =>
+    archiveResponse(html, { locale, defaultLocale, defaultPrefix })
 
   const app = new Hono<{ Bindings: Record<string, R2Bucket> }>()
 
@@ -233,14 +188,13 @@ export function createWorker(options?: CloudflareR2WorkerOptions) {
       const notFound = await findPage(bucket, '/404')
       if (notFound && !archiveResponse(notFound.html)) {
         const { html: raw404 } = parseCacheComment(notFound.html)
-        const fragEntries = await fetchFragmentEntries(bucket, raw404)
-        if (fragEntries instanceof Response) return fragEntries
+        const fragEntries = await fetchFragmentEntries(path => readFragmentHtml(bucket, path), raw404)
         return c.html(assembleEsi(raw404, fragEntries), 404)
       }
       return c.html('<h1>404 — Page not found</h1>', 404)
     }
 
-    const archived = archiveResponse(result.html)
+    const archived = archiveFor(result.html, result.locale)
     if (archived) {
       c.executionCtx.waitUntil(cache.put(request, archived.clone()))
       return archived
@@ -249,11 +203,7 @@ export function createWorker(options?: CloudflareR2WorkerOptions) {
     const { html: rawHtml, browser, edge } = parseCacheComment(result.html)
 
     // Read all fragments in parallel (with locale fallback)
-    const fragEntries = await fetchFragmentEntries(bucket, rawHtml)
-    if (fragEntries instanceof Response) {
-      c.executionCtx.waitUntil(cache.put(request, fragEntries.clone()))
-      return fragEntries
-    }
+    const fragEntries = await fetchFragmentEntries(path => readFragmentHtml(bucket, path), rawHtml)
     const assembled = assembleEsi(rawHtml, fragEntries)
 
     // Compute ETag

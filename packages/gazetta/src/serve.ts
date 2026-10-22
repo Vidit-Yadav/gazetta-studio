@@ -5,7 +5,7 @@
  *
  * SOLID breakdown:
  * - extractLocale: strips locale prefix from URL (SRP)
- * - fetchFragment: reads a fragment file with locale fallback (SRP)
+ * - fetchFragmentEntries: reads fragment files with locale fallback + alias handling (SRP)
  * - findPage: resolves a request path to page HTML (SRP)
  * - acceptLanguageRedirect: middleware for language detection (SRP, OCP)
  * - createServer: composes the above into a Hono app
@@ -15,10 +15,9 @@ import { Hono } from 'hono'
 import { logger } from 'hono/logger'
 import { createHash } from 'node:crypto'
 import type { StorageProvider, TargetType } from './types.js'
-import { assembleEsi, parseCacheComment, splitFragment, findEsiPaths } from './assemble.js'
-import { ArchivedNoAliasError } from './archive-helpers.js'
-import { parseArchiveMarker } from './runtime/archive-marker.js'
-import { archiveGoneResponse, archiveResponse } from './runtime/archive-response.js'
+import { assembleEsi, parseCacheComment } from './assemble.js'
+import { archiveResponse } from './runtime/archive-response.js'
+import { fetchFragmentEntries } from './runtime/fragment-fetch.js'
 
 export interface ServeOptions {
   storage: StorageProvider
@@ -28,6 +27,8 @@ export interface ServeOptions {
   locales?: string[]
   /** Default locale — requests to the default locale have no URL prefix. Falls back to first in `locales`. */
   defaultLocale?: string
+  /** When true, the default locale also gets a URL prefix (e.g. /en/about). */
+  defaultPrefix?: boolean
   /** When true, redirects unlocalized requests to the best Accept-Language match (302). */
   detection?: boolean
 }
@@ -88,24 +89,6 @@ export function matchAcceptLanguage(header: string | undefined, locales: string[
 // Fragment fetching with locale fallback (SRP)
 // ---------------------------------------------------------------------------
 
-interface FragmentParts {
-  head: string
-  body: string
-}
-
-const MAX_FRAGMENT_ALIAS_HOPS = 5
-
-function fragmentName(path: string): string {
-  return path.replace(/^\/?fragments\//, '').replace(/\/index(?:\.[a-z-]+)?\.html$/, '')
-}
-
-function aliasFragmentPath(path: string, target: string): string | null {
-  if (!target || target.startsWith('/') || target.includes('\\') || /[?#]/.test(target)) return null
-  if (target.split('/').some(part => part === '' || part === '.' || part === '..')) return null
-  const indexFile = path.slice(path.lastIndexOf('/') + 1)
-  return `/fragments/${target}/${indexFile}`
-}
-
 async function readFragmentHtml(storage: StorageProvider, path: string): Promise<string | null> {
   try {
     return await storage.readFile(path.slice(1))
@@ -121,41 +104,6 @@ async function readFragmentHtml(storage: StorageProvider, path: string): Promise
       }
     }
     return null
-  }
-}
-
-async function fetchFragment(storage: StorageProvider, path: string): Promise<[string, FragmentParts]> {
-  const visited = new Set<string>()
-  let currentPath = path
-
-  for (let hop = 0; hop <= MAX_FRAGMENT_ALIAS_HOPS; hop++) {
-    if (visited.has(currentPath)) throw new ArchivedNoAliasError(fragmentName(path))
-    visited.add(currentPath)
-
-    const html = await readFragmentHtml(storage, currentPath)
-    if (html === null) return [path, { head: '', body: `<!-- fragment not found: ${path} -->` }]
-
-    const marker = parseArchiveMarker(html)
-    if (!marker) return [path, splitFragment(html)]
-    if (marker.kind === 'gone') throw new ArchivedNoAliasError(fragmentName(currentPath))
-
-    const nextPath = aliasFragmentPath(currentPath, marker.target)
-    if (!nextPath) throw new ArchivedNoAliasError(fragmentName(currentPath))
-    currentPath = nextPath
-  }
-
-  throw new ArchivedNoAliasError(fragmentName(path))
-}
-
-async function fetchFragmentEntries(
-  storage: StorageProvider,
-  html: string,
-): Promise<Map<string, FragmentParts> | Response> {
-  try {
-    return new Map(await Promise.all(findEsiPaths(html).map(p => fetchFragment(storage, p))))
-  } catch (err) {
-    if (err instanceof ArchivedNoAliasError) return archiveGoneResponse()
-    throw err
   }
 }
 
@@ -236,8 +184,11 @@ export async function findPage(
 // ---------------------------------------------------------------------------
 
 export function createServer(options: ServeOptions) {
-  const { storage, type = 'dynamic', locales, defaultLocale, detection } = options
+  const { storage, type = 'dynamic', locales, defaultLocale, defaultPrefix, detection } = options
   const nonDefaultLocales = locales?.filter(l => l !== (defaultLocale ?? locales?.[0])) ?? []
+  const archiveFor = (html: string, locale: string | undefined) =>
+    archiveResponse(html, { locale, defaultLocale, defaultPrefix })
+  const readFragment = (path: string) => readFragmentHtml(storage, path)
   const app = new Hono()
 
   app.use(logger())
@@ -258,10 +209,11 @@ export function createServer(options: ServeOptions) {
   if (type === 'static') {
     app.get('*', async c => {
       const requestPath = new URL(c.req.url).pathname
+      const { locale } = extractLocale(requestPath, locales ?? [])
       const filePath = requestPath === '/' ? 'index.html' : `${requestPath.replace(/\/$/, '')}/index.html`
       try {
         const html = await storage.readFile(filePath)
-        const archived = archiveResponse(html)
+        const archived = archiveFor(html, locale)
         if (archived) return archived
         const etag = `"${createHash('sha256').update(html).digest('hex').slice(0, 16)}"`
         if (c.req.header('If-None-Match') === etag) return new Response(null, { status: 304, headers: { ETag: etag } })
@@ -269,7 +221,7 @@ export function createServer(options: ServeOptions) {
       } catch {
         try {
           const html = await storage.readFile(requestPath.slice(1))
-          const archived = archiveResponse(html)
+          const archived = archiveFor(html, locale)
           if (archived) return archived
           return c.html(html)
         } catch {
@@ -336,19 +288,17 @@ export function createServer(options: ServeOptions) {
       const notFound = await findPage(storage, '/404')
       if (notFound && !archiveResponse(notFound.html)) {
         const { html: raw404 } = parseCacheComment(notFound.html)
-        const fragEntries = await fetchFragmentEntries(storage, raw404)
-        if (fragEntries instanceof Response) return fragEntries
+        const fragEntries = await fetchFragmentEntries(readFragment, raw404)
         return c.html(assembleEsi(raw404, fragEntries), 404)
       }
       return c.html('<h1>404 — Page not found</h1>', 404)
     }
 
-    const archived = archiveResponse(result.html)
+    const archived = archiveFor(result.html, result.locale)
     if (archived) return archived
 
     const { html: rawHtml, browser, edge } = parseCacheComment(result.html)
-    const fragEntries = await fetchFragmentEntries(storage, rawHtml)
-    if (fragEntries instanceof Response) return fragEntries
+    const fragEntries = await fetchFragmentEntries(readFragment, rawHtml)
     const html = assembleEsi(rawHtml, fragEntries)
 
     const etag = `"${createHash('sha256').update(html).digest('hex').slice(0, 16)}"`

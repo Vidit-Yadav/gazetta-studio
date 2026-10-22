@@ -11,22 +11,39 @@
  * Archive responses use a short cache window so a re-published alias/gone
  * state propagates quickly (design-soft-delete.md Q10).
  */
+import { localeRoutePrefix } from '../locale.js'
 import { parseArchiveMarker } from './archive-marker.js'
 import { deriveRoute } from './derive-route.js'
 
 export const ARCHIVE_CACHE_CONTROL = 'max-age=300'
 
+export interface ArchiveResponseOptions {
+  locale?: string
+  defaultLocale?: string
+  defaultPrefix?: boolean
+}
+
 export function archiveGoneResponse(): Response {
   return new Response(null, { status: 410, headers: { 'Cache-Control': ARCHIVE_CACHE_CONTROL } })
 }
 
-export function archiveResponse(input: Uint8Array | string): Response | null {
+export function archiveResponse(input: Uint8Array | string, options: ArchiveResponseOptions = {}): Response | null {
   const marker = parseArchiveMarker(input)
   if (!marker) return null
 
   if (marker.kind === 'gone') return archiveGoneResponse()
 
-  const location = deriveRoute(marker.target)
+  const route = deriveRoute(marker.target)
+  const localePrefix = options.locale
+    ? localeRoutePrefix(options.locale, {
+        supported: [options.locale],
+        default: options.defaultLocale ?? options.locale,
+        defaultPrefix: options.defaultPrefix ?? false,
+        detection: false,
+        fallbacks: {},
+      })
+    : ''
+  const location = `${localePrefix}${route === '/' ? '' : route}` || '/'
   if (!location.startsWith('/') || location.startsWith('//') || location.includes('\\')) {
     return archiveGoneResponse()
   }

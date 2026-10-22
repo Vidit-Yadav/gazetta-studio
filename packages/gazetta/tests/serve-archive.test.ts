@@ -34,9 +34,12 @@ function esiSeed(): Record<string, string> {
       '<html><head></head><body>Page<!--esi:/fragments/old-header/index.html--></body></html>',
     'pages/with-gone-fragment/index.html':
       '<html><head></head><body>Page<!--esi:/fragments/gone-header/index.html--></body></html>',
+    'pages/with-unresolved-fragment/index.html':
+      '<html><head></head><body>Page<!--esi:/fragments/broken-header/index.html--></body></html>',
     'fragments/header/index.html': '<head><style>.header{color:red}</style></head><body>Header</body>',
     'fragments/old-header/index.html': archiveMarker({ kind: 'alias', target: 'header' }),
     'fragments/gone-header/index.html': archiveMarker({ kind: 'gone' }),
+    'fragments/broken-header/index.html': archiveMarker({ kind: 'alias', target: 'missing-header' }),
     // Marker beyond the 200-byte detection window — not an archive marker.
     'pages/late/index.html': `${'x'.repeat(240)}\n${archiveMarker({ kind: 'gone' })}`,
     // Marker-like text inside a live page — not at byte 0.
@@ -89,12 +92,25 @@ describe('serve archive markers (dynamic/ESI)', () => {
     expect(body).not.toContain('gazetta:archived')
   })
 
-  it('returns 410 when an ESI fragment is archived without an alias', async () => {
+  it('omits an ESI fragment archived without an alias', async () => {
     const app = buildServer(esiSeed())
     const res = await app.request('http://localhost/with-gone-fragment')
 
-    expect(res.status).toBe(410)
-    expect(res.headers.get('cache-control')).toBe(ARCHIVE_CACHE_CONTROL)
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('Page')
+    expect(body).toContain('<!-- fragment archived: @gone-header -->')
+    expect(body).not.toContain('gazetta:archived')
+  })
+
+  it('omits an ESI fragment whose alias target does not resolve', async () => {
+    const app = buildServer(esiSeed())
+    const res = await app.request('http://localhost/with-unresolved-fragment')
+
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('<!-- fragment archived: @broken-header -->')
+    expect(body).not.toContain('gazetta:archived')
   })
 
   it('returns 410 Gone for a gone page', async () => {
@@ -165,8 +181,26 @@ describe('serve archive markers (localized)', () => {
 
     const res = await app.request('http://localhost/fr/about')
     expect(res.status).toBe(301)
-    expect(res.headers.get('location')).toBe('/')
+    expect(res.headers.get('location')).toBe('/fr')
     expect(res.headers.get('cache-control')).toBe(ARCHIVE_CACHE_CONTROL)
+  })
+
+  it('keeps the default-prefix locale on alias redirects', async () => {
+    const seed = esiSeed()
+    seed['pages/about/index.en.html'] = archiveMarker({ kind: 'alias', target: 'home' })
+    const storage = memoryStorage()
+    storage.seed(seed)
+    const app = createServer({
+      storage,
+      type: 'dynamic',
+      locales: ['en', 'fr'],
+      defaultLocale: 'en',
+      defaultPrefix: true,
+    })
+
+    const res = await app.request('http://localhost/en/about')
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe('/en')
   })
 
   it('keeps locale fallback for live pages without a locale file', async () => {

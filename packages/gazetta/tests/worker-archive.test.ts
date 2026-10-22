@@ -76,10 +76,13 @@ function esiSeed(): Record<string, string> {
       '<html><head></head><body>Page<!--esi:/fragments/old-header/index.html--></body></html>',
     'pages/with-gone-fragment/index.html':
       '<html><head></head><body>Page<!--esi:/fragments/gone-header/index.html--></body></html>',
+    'pages/with-unresolved-fragment/index.html':
+      '<html><head></head><body>Page<!--esi:/fragments/broken-header/index.html--></body></html>',
     'pages/late/index.html': `${'x'.repeat(240)}\n${archiveMarker({ kind: 'gone' })}`,
     'fragments/header/index.html': '<head><style>.header{color:red}</style></head><body>Header</body>',
     'fragments/old-header/index.html': archiveMarker({ kind: 'alias', target: 'header' }),
     'fragments/gone-header/index.html': archiveMarker({ kind: 'gone' }),
+    'fragments/broken-header/index.html': archiveMarker({ kind: 'alias', target: 'missing-header' }),
   }
 }
 
@@ -180,14 +183,29 @@ describe('Cloudflare worker archive markers', () => {
     expect(body).not.toContain('gazetta:archived')
   })
 
-  it('returns 410 when an ESI fragment is archived without an alias', async () => {
+  it('omits an ESI fragment archived without an alias', async () => {
     const { bucket } = fakeBucket(esiSeed())
     const app = createWorker()
 
     const res = await fetchPage(app, bucket, '/with-gone-fragment')
 
-    expect(res.status).toBe(410)
-    expect(res.headers.get('cache-control')).toBe(ARCHIVE_CACHE_CONTROL)
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('Page')
+    expect(body).toContain('<!-- fragment archived: @gone-header -->')
+    expect(body).not.toContain('gazetta:archived')
+  })
+
+  it('omits an ESI fragment whose alias target does not resolve', async () => {
+    const { bucket } = fakeBucket(esiSeed())
+    const app = createWorker()
+
+    const res = await fetchPage(app, bucket, '/with-unresolved-fragment')
+
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('<!-- fragment archived: @broken-header -->')
+    expect(body).not.toContain('gazetta:archived')
   })
 
   it('uses the derived route for non-trivial page names', async () => {
@@ -243,8 +261,20 @@ describe('Cloudflare worker archive markers', () => {
     const res = await fetchPage(app, bucket, '/fr/about')
 
     expect(res.status).toBe(301)
-    expect(res.headers.get('location')).toBe('/')
+    expect(res.headers.get('location')).toBe('/fr')
     expect(res.headers.get('cache-control')).toBe(ARCHIVE_CACHE_CONTROL)
+  })
+
+  it('keeps the default-prefix locale on alias redirects', async () => {
+    const seed = esiSeed()
+    seed['pages/about/index.en.html'] = archiveMarker({ kind: 'alias', target: 'home' })
+    const { bucket } = fakeBucket(seed)
+    const app = createWorker({ locales: ['en', 'fr'], defaultLocale: 'en', defaultPrefix: true })
+
+    const res = await fetchPage(app, bucket, '/en/about')
+
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe('/en')
   })
 
   it('keeps locale fallback for live pages without a locale file', async () => {

@@ -35,6 +35,15 @@ const MARKER_PREFIX_BYTES = 200
 /** Regex anchors at start of input; closed-form grammar. */
 const MARKER_RE = /^<!-- gazetta:archived (alias=([\S]+)|gone) -->/
 
+export type AliasTargetIssue = 'whitespace' | 'relative' | 'segments'
+
+export function aliasTargetIssue(target: string): AliasTargetIssue | null {
+  if (!target || /\s/.test(target)) return 'whitespace'
+  if (target.startsWith('/') || target.includes('\\') || /[?#]/.test(target)) return 'relative'
+  if (target.split('/').some(part => part === '' || part === '.' || part === '..')) return 'segments'
+  return null
+}
+
 /**
  * Emit a marker line for a page/fragment that's archived. Returns the
  * full marker line including trailing newline so callers concatenate
@@ -51,17 +60,18 @@ const MARKER_RE = /^<!-- gazetta:archived (alias=([\S]+)|gone) -->/
 export function archiveMarker(marker: ArchiveMarker): string {
   if (marker.kind === 'alias') {
     const target = marker.target
-    if (!target || /\s/.test(target)) {
+    const issue = aliasTargetIssue(target)
+    if (issue === 'whitespace') {
       throw new Error(
         `Invalid archive alias target ${JSON.stringify(target)} — must be a non-empty string with no whitespace.`,
       )
     }
-    if (target.startsWith('/') || target.includes('\\') || /[?#]/.test(target)) {
+    if (issue === 'relative') {
       throw new Error(
         `Invalid archive alias target ${JSON.stringify(target)} — must be a relative page or fragment name.`,
       )
     }
-    if (target.split('/').some(part => part === '' || part === '.' || part === '..')) {
+    if (issue === 'segments') {
       throw new Error(
         `Invalid archive alias target ${JSON.stringify(target)} — must not contain empty, "." or ".." path segments.`,
       )
