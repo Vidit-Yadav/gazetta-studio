@@ -596,6 +596,11 @@ function setupDrag(el: HTMLElement | null) {
     parent: el,
     values: dragValues,
     dragHandle: '.drag-handle',
+    // Only actual rows are draggable nodes. The keyboard insertion line is
+    // also a direct child; 0.5.3's remapNodes counts every child, warns on
+    // the value mismatch, and skips the remap, leaving rows after the line
+    // mapped to the wrong value.
+    draggable: child => child.classList.contains('top-level-block'),
     handleNodeFocus: (data, state) => {
       if (data.e.target === data.e.currentTarget || !state.pointerDown) return
       if (data.e.target instanceof Element && data.e.target.closest('.drag-handle')) return

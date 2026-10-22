@@ -364,6 +364,16 @@ test.describe('Component operations', () => {
     const saveBtn = page.locator('[data-testid="save-btn"]')
     await expect(tree.row('hero')).toBeVisible({ timeout: 10000 })
 
+    // FormKit's remapNodes warns when its draggable-node count differs from
+    // the value count. The insertion line is a child of the same parent, so
+    // without the draggable filter it would trigger this while lifted.
+    const draggableWarnings: string[] = []
+    page.on('console', msg => {
+      if (msg.type() === 'warning' && msg.text().includes('number of draggable items')) {
+        draggableWarnings.push(msg.text())
+      }
+    })
+
     const before = await topLevelNames(page)
     const bannerBefore = before.indexOf('banner')
     expect(bannerBefore).toBeGreaterThan(0)
@@ -388,6 +398,7 @@ test.describe('Component operations', () => {
 
     await page.keyboard.press('Space')
     await expect(indicator).toHaveCount(0)
+    expect(draggableWarnings).toEqual([])
 
     await expect
       .poll(async () => {
@@ -397,6 +408,24 @@ test.describe('Component operations', () => {
       .toBe(bannerBefore - 1)
     await expect(saveBtn).toBeEnabled()
     await expect(handle).toBeFocused()
+
+    // A pointer drag after the insertion line has come and gone must still
+    // grab the row under the cursor and land it on the right boundary.
+    const target = tree.row('hero')
+    const from = (await handle.boundingBox())!
+    const to = (await target.boundingBox())!
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2 - 10, { steps: 5 })
+    await page.mouse.move(to.x + to.width / 2, to.y + 2, { steps: 20 })
+    await page.mouse.up()
+
+    await expect
+      .poll(async () => {
+        const names = await topLevelNames(page)
+        return names.indexOf('banner') - names.indexOf('hero')
+      })
+      .toBe(-1)
     // Pending only; leaving the on-disk fixture untouched keeps the
     // next test's baseline order intact.
   })

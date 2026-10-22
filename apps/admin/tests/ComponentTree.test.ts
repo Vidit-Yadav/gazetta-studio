@@ -650,6 +650,50 @@ describe('ComponentTree — drag handle + Alt+arrow reorder (#105)', () => {
     expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(false)
   })
 
+  it('the drag controller only counts top-level rows as draggable nodes', async () => {
+    // The library is mocked here, so its remapNodes warning cannot be
+    // observed in this suite. This pins the integration contract the warning
+    // guards: the filter FormKit receives must accept exactly the rows that
+    // correspond to values, and reject the insertion line and any other
+    // direct child. The e2e Space path exercises the real library and
+    // asserts the warning is absent.
+    dragAndDropMock.mockClear()
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+
+    const dragOptions = dragAndDropMock.mock.calls[0][0] as {
+      parent: HTMLElement
+      values: { value: unknown[] }
+      draggable?: (child: HTMLElement) => boolean
+    }
+    expect(dragOptions.draggable).toBeTypeOf('function')
+    const isDraggable = dragOptions.draggable!
+
+    // Lift a row so the insertion line is rendered as a direct child.
+    await w.find('[data-testid="drag-handle-hero"]').trigger('keydown', { key: ' ' })
+    const indicator = dragOptions.parent.querySelector<HTMLElement>('[data-testid="keyboard-insertion-indicator"]')
+    expect(indicator).not.toBeNull()
+    expect(isDraggable(indicator!)).toBe(false)
+
+    const row = dragOptions.parent.querySelector<HTMLElement>('.top-level-block')
+    expect(row).not.toBeNull()
+    expect(isDraggable(row!)).toBe(true)
+
+    const unrelated = document.createElement('div')
+    unrelated.className = 'not-a-component-row'
+    dragOptions.parent.appendChild(unrelated)
+    expect(isDraggable(unrelated)).toBe(false)
+    unrelated.remove()
+
+    // remapNodes warns as soon as the eligible-child count differs from the
+    // value count and then skips the remap entirely.
+    const eligibleChildren = Array.from(dragOptions.parent.children).filter(
+      child => child instanceof HTMLElement && isDraggable(child),
+    )
+    expect(eligibleChildren).toHaveLength(dragOptions.values.value.length)
+  })
+
   it('removes the top-level component at the clicked index', async () => {
     selectStarterHome()
     const w = mountTree(fakeFragmentsApi())
