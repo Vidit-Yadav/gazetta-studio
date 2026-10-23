@@ -42,7 +42,7 @@ The decisions below are the load-bearing choices. Each was grilled with explicit
 
 ### Q1 — DnD library: `@formkit/drag-and-drop`
 
-Built by the FormKit team explicitly to fix the Vue+React DnD-with-a11y gap. Ships drag-and-drop, drop indicators, auto-scroll, ~12.5KB gzipped, MIT, active maintenance. The pinned 0.5.3 build does **not** implement its documented keyboard handler, so Gazetta owns Space-to-lift + arrows + Space-to-drop in `ComponentTree.vue`. The data-first model (mutate the array, DOM follows) composes naturally with Pinia stores.
+Built by the FormKit team explicitly to fix the Vue+React DnD-with-a11y gap. Ships drag-and-drop, drop indicators, auto-scroll, ~12.5KB gzipped, MIT, active maintenance. The pinned 0.6.1 build does **not** implement its documented keyboard handler, so Gazetta owns Space-to-lift + arrows + Space-to-drop in `ComponentTree.vue`. The data-first model (mutate the array, DOM follows) composes naturally with Pinia stores.
 
 **Rejected alternatives** (full table in [team-preferences research](team-preferences.md) audit; condensed):
 
@@ -55,7 +55,7 @@ Built by the FormKit team explicitly to fix the Vue+React DnD-with-a11y gap. Shi
 | `vue-draggable-next` | Stale (Aug 2025); a11y gap |
 | `vuedraggable` (original) | **Vue 2 only** |
 
-**Pre-1.0 risk on FormKit DnD (0.5.3 today):** mitigated by pinning the exact version + reading changelogs on bump. The a11y risk on SortableJS is open-ended (issue #1063 has been open since 2014).
+**Pre-1.0 risk on FormKit DnD (0.6.1 today):** mitigated by pinning the exact version + reading changelogs on bump. The a11y risk on SortableJS is open-ended (issue #1063 has been open since 2014).
 
 ### Q2 — Always-visible left grip handle
 
@@ -99,7 +99,7 @@ The issue's "Scope" line lists these as CONSIDERATIONS, not v1 requirements.
 
 Two keyboard paths, both documented in the row's tooltip:
 
-1. **Space-to-lift** (app-implemented; the pinned FormKit 0.5.3 keyboard handler is empty) — focus the grip handle, press Space, use ArrowUp/ArrowDown to navigate, press Space again to drop. WAI-ARIA "grab and drop" pattern. Announcements are not part of this cut; a custom live region is the follow-up if we keep this path.
+1. **Space-to-lift** (app-implemented; the pinned FormKit 0.6.1 keyboard handler is empty) — focus the grip handle, press Space, use ArrowUp/ArrowDown to navigate, press Space again to drop. WAI-ARIA "grab and drop" pattern. Announcements are not part of this cut; a custom live region is the follow-up if we keep this path.
 
 2. **Alt+ArrowUp / Alt+ArrowDown** — focus any cell on the row, hold Alt, press ArrowUp or ArrowDown, the row moves one position immediately. Power-user one-keystroke shortcut. Custom layer on top of the library (~30 LOC — `@vueuse/core`'s `onKeyStroke` against the row).
 
@@ -128,7 +128,7 @@ Today's `addComponent` and `removeComponent` toast. `moveComponent` does not. Wi
 
 1. **Visual reflow** — the row physically moves to its new position; this IS the feedback.
 2. **Dirty dot** — already on the page node in the site tree; signals "pending save."
-3. **ARIA live-region announcement** — a follow-up; the pinned FormKit 0.5.3 build does not ship the keyboard handler or announcements the guide originally assumed.
+3. **ARIA live-region announcement** — a follow-up; the pinned FormKit 0.6.1 build does not ship the keyboard handler or announcements the guide originally assumed.
 
 Existing `addComponent` / `removeComponent` toasts continue to fire — those change the SET, not just the order, and the toast is the persistence signal for them.
 
@@ -164,7 +164,7 @@ Library handles long-press to lift + finger-drag to move + release to drop. Auto
 
 ### Screen-reader announcements
 
-Not implemented in this cut. The pinned `@formkit/drag-and-drop` 0.5.3 build has no working keyboard handler and emits no live-region announcements, so `ComponentTree.vue` owns the Space/arrow behavior. Add a polite live region when keyboard accessibility is hardened:
+Not implemented in this cut. The pinned `@formkit/drag-and-drop` 0.6.1 build has no working keyboard handler and emits no live-region announcements, so `ComponentTree.vue` owns the Space/arrow behavior. Add a polite live region when keyboard accessibility is hardened:
 - "Picked up: hero. Currently at position 1 of 4"
 - "Moved to position 2 of 4"
 - "Dropped at position 2 of 4"
@@ -226,7 +226,7 @@ No migration required. Sites without any DnD-related config continue to work —
 
 ## Open implementation questions
 
-1. **Library version pinning.** `@formkit/drag-and-drop` is 0.5.3 (pre-1.0). Pin to exact version; document in `package.json` with a comment. Bump only after reading changelog + smoke-testing the playground.
+1. **Library version pinning.** `@formkit/drag-and-drop` is 0.6.1 (pre-1.0). Pin to exact version; document in `package.json` with a comment. Bump only after reading changelog + smoke-testing the playground.
 2. **Touch threshold for long-press.** FormKit's default is 250ms. Verify it doesn't interfere with row-tap-to-select on iPad. If it does, increase to 500ms or add an explicit "touch-drag mode" toggle.
 3. **Animation duration for reflow.** Library default ~200ms. Confirm against the dev playground's "feels right" bar.
 4. **Drop indicator color in dark mode.** PrimeVue Aura's `--color-primary` is a brighter emerald in dark mode; should be visible against `--color-bg` either way, but verify with a real dark-mode capture.

@@ -25,6 +25,7 @@ import ComponentTree from '../src/client/components/ComponentTree.vue'
 import { FRAGMENTS_API, type FragmentsApi } from '../src/client/composables/api.js'
 import { useSelectionStore } from '../src/client/stores/selection.js'
 import { useEditingStore } from '../src/client/stores/editing.js'
+import { useComponentFocusStore } from '../src/client/stores/componentFocus.js'
 import { useEditorStashStore } from '../src/client/stores/editorStash.js'
 import { useEditorContentStore } from '../src/client/stores/editorContent.js'
 import { useEditorMetadataStore } from '../src/client/stores/editorMetadata.js'
@@ -421,6 +422,73 @@ describe('ComponentTree', () => {
     expect(w.find('[data-testid="component-header"]').exists()).toBe(true)
     expect(w.find('[data-testid="component-nav"]').exists()).toBe(true)
   })
+
+  it('gives reused fragment refs globally unique keys and isolated selection/hover', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const getFragment = vi.fn(
+        async (name: string): Promise<FragmentDetail> => ({
+          name,
+          template: 'shared',
+          dir: `fragments/${name}`,
+          components: [],
+        }),
+      )
+      // The same fragment appears twice under group-a (both nested rows land
+      // in one flattened v-for), once under group-b, and twice at top level.
+      // Occurrence counts are local to each group, so a name+occurrence key
+      // collides and would select/hover every matching row at once.
+      setPageSelection({
+        name: 'home',
+        route: '/',
+        template: 'page-default',
+        dir: 'pages/home',
+        components: [
+          {
+            name: 'group-a',
+            template: 'group',
+            components: [
+              { name: 'left', template: 'box', components: ['@shared'] },
+              { name: 'right', template: 'box', components: ['@shared'] },
+            ],
+          },
+          {
+            name: 'group-b',
+            template: 'group',
+            components: [{ name: 'inner', template: 'box', components: ['@shared'] }],
+          },
+          '@shared',
+          '@shared',
+        ],
+      })
+      const w = mountTree(fakeFragmentsApi({ getFragment }))
+      await flushMicrotasks()
+
+      const rows = w.findAll('[data-testid="component-shared"]')
+      expect(rows).toHaveLength(5)
+      const warnings = warn.mock.calls.map(args => args.join(' ')).join('\n')
+      expect(warnings).not.toMatch(/duplicate keys/i)
+
+      // Clicking one reused fragment highlights only that instance.
+      await rows[1].trigger('click')
+      expect(w.findAll('[data-testid="component-shared"].selected')).toHaveLength(1)
+      expect(rows[1].classes()).toContain('selected')
+
+      // Preview-hovering another instance highlights only that instance.
+      // (Tree hover is plain CSS; `hoveredNodeKey` tracks preview hover.)
+      const hoverTarget = w.findAll('[data-testid="component-shared"]')[2]
+      await hoverTarget.trigger('mouseenter')
+      const focus = useComponentFocusStore()
+      expect(focus.highlightGzId).toBeTruthy()
+      focus.previewHover(focus.highlightGzId)
+      await w.vm.$nextTick()
+      const hovered = w.findAll('[data-testid="component-shared"].hovered')
+      expect(hovered).toHaveLength(1)
+      expect(hovered[0].element).toBe(hoverTarget.element)
+    } finally {
+      warn.mockRestore()
+    }
+  })
 })
 
 describe('ComponentTree — drag handle + Alt+arrow reorder (#105)', () => {
@@ -648,6 +716,93 @@ describe('ComponentTree — drag handle + Alt+arrow reorder (#105)', () => {
     dragOptions.onDragstart({ position: 0, state: {} })
     await w.vm.$nextTick()
     expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(false)
+  })
+
+  it('resolves a synthetic pointerup drop from the coordinates, not the captured target', async () => {
+    dragAndDropMock.mockClear()
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    const editing = useEditingStore()
+    const moveSpy = vi.spyOn(editing, 'moveComponentStructural')
+
+    const dragOptions = dragAndDropMock.mock.calls[0][0] as {
+      parent: HTMLElement
+      onDragstart: (data: unknown) => void
+      onDragend: (data: unknown) => void
+    }
+    const blocks = [...dragOptions.parent.querySelectorAll<HTMLElement>(':scope > .top-level-block')]
+    expect(blocks).toHaveLength(3)
+    // Release over the bottom half of banner (index 2).
+    vi.spyOn(blocks[2]!, 'getBoundingClientRect').mockReturnValue({
+      top: 100,
+      bottom: 120,
+      height: 20,
+      left: 0,
+      right: 100,
+      width: 100,
+      x: 0,
+      y: 100,
+      toJSON: () => ({}),
+    } as DOMRect)
+    const destinationRow = blocks[2]!.querySelector('.top-level-row')
+    const sourceGrip = blocks[0]!.querySelector('.drag-handle')
+    const originalElementFromPoint = document.elementFromPoint
+    document.elementFromPoint = vi.fn(() => destinationRow)
+    try {
+      // Synthetic drags skip onDragstart; pointer capture keeps the
+      // pointerup target on the source grip even over the destination.
+      sourceGrip!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 50, clientY: 5 }))
+      sourceGrip!.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 50, clientY: 115 }))
+      dragOptions.onDragend({ state: {} })
+    } finally {
+      document.elementFromPoint = originalElementFromPoint
+    }
+
+    expect(moveSpy).toHaveBeenCalledTimes(1)
+    expect(moveSpy.mock.calls[0]![2]).toBe(0)
+    expect(moveSpy.mock.calls[0]![3]).toBe(2)
+  })
+
+  it('falls back to the drop event target when coordinates miss the tree', async () => {
+    dragAndDropMock.mockClear()
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    const editing = useEditingStore()
+    const moveSpy = vi.spyOn(editing, 'moveComponentStructural')
+
+    const dragOptions = dragAndDropMock.mock.calls[0][0] as {
+      parent: HTMLElement
+      onDragstart: (data: unknown) => void
+      onDragend: (data: unknown) => void
+    }
+    const blocks = [...dragOptions.parent.querySelectorAll<HTMLElement>(':scope > .top-level-block')]
+    vi.spyOn(blocks[2]!, 'getBoundingClientRect').mockReturnValue({
+      top: 100,
+      bottom: 120,
+      height: 20,
+      left: 0,
+      right: 100,
+      width: 100,
+      x: 0,
+      y: 100,
+      toJSON: () => ({}),
+    } as DOMRect)
+    const originalElementFromPoint = document.elementFromPoint
+    // A point over unrelated chrome must not select that element's row.
+    document.elementFromPoint = vi.fn(() => document.body)
+    try {
+      dragOptions.onDragstart({ position: 0, state: {} })
+      blocks[2]!.dispatchEvent(new MouseEvent('drop', { bubbles: true, clientX: 50, clientY: 115 }))
+      dragOptions.onDragend({ state: {} })
+    } finally {
+      document.elementFromPoint = originalElementFromPoint
+    }
+
+    expect(moveSpy).toHaveBeenCalledTimes(1)
+    expect(moveSpy.mock.calls[0]![2]).toBe(0)
+    expect(moveSpy.mock.calls[0]![3]).toBe(2)
   })
 
   it('the drag controller only counts top-level rows as draggable nodes', async () => {

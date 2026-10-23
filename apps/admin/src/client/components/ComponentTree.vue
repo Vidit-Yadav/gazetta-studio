@@ -104,7 +104,11 @@ async function buildComponentNode(
         ? await Promise.all(frag.components.map((c, i) => buildComponentNode(c, i, treePath, map, childCounts)))
         : []
       return {
-        key: `frag:${fragName}:${occurrence}`,
+        // The same fragment can be referenced from different sibling groups,
+        // so occurrence alone is not tree-unique. Include the full path
+        // (parent path + @frag) to keep keys globally distinct; occurrence
+        // still separates repeated refs to one fragment in a single group.
+        key: `frag:${treePath}:${occurrence}`,
         label: entry,
         data: {
           isFragment: true,
@@ -119,7 +123,7 @@ async function buildComponentNode(
       }
     } catch (err) {
       return {
-        key: `frag:${fragName}:${occurrence}`,
+        key: `frag:${treePath}:${occurrence}`,
         label: entry,
         data: { isFragment: true, fragName, treePath, index, isTopLevel: true, error: (err as Error).message },
         children: [],
@@ -508,11 +512,11 @@ function moveComponent(index: number, direction: -1 | 1) {
 // --- Drag-and-drop reorder (#105) ---
 //
 // `@formkit/drag-and-drop` operates on a ref of values and mutates it on
-// every live sort while the pointer crosses rows. We deliberately ignore
-// those intermediate `onSort` events: the library's node indices are stale
-// across multiple sorts in one gesture, so committing each event moves the
-// wrong row. Instead, one drag commits exactly one position move on
-// `onDragend`, using the pointer's release point over the target block.
+// every live sort while the pointer crosses rows. 0.6.1 remaps node
+// identities during a drag, but the intermediate sort events still describe
+// transient positions. We ignore them so one gesture commits exactly one
+// structural move, on `onDragend`, using the pointer's release point over the
+// target block rather than a live index.
 //
 // `dragHandle: '.drag-handle'` restricts pointer drag to clicks on the
 // grip element (not the row body — preserves click-to-select).
@@ -521,7 +525,10 @@ function moveComponent(index: number, direction: -1 | 1) {
 // into a child during pointerdown. The grip is itself a focusable button,
 // so that guard would disable the block before a drag could start. Keep
 // the guard for the row's other focusable children, but exempt the grip.
-// (The library's keyboard handler is empty in 0.5.3; the app handles
+// 0.6.1 still has this behavior (verified against the installed build and
+// the mouse-drag e2e tests); removing the override makes grip drags fail
+// whenever the grip was not already focused.
+// (The library's keyboard handler is still empty in 0.6.1; the app handles
 // Space-to-lift in `onTopLevelKeydown` below.)
 
 const dragParentRef = ref<HTMLElement | null>(null)
@@ -575,8 +582,18 @@ function setupDrag(el: HTMLElement | null) {
   // point too: the library's `incomingDirection` is entry direction,
   // not the drop half, so it can't distinguish before/after a block.
   const recordDrop = (e: DragEvent | PointerEvent) => {
-    const block = e.target instanceof Element ? e.target.closest('.top-level-block') : null
-    if (!(block instanceof HTMLElement) || !el.contains(block)) return
+    // Touch drags use implicit pointer capture, so `e.target` can stay on the
+    // source grip even when the finger is released over another row. Resolve
+    // the row under the release coordinates first and fall back to the event
+    // target only when the point does not land inside this tree.
+    const blockAt = (target: Element | null): HTMLElement | null => {
+      const block = target?.closest('.top-level-block')
+      return block instanceof HTMLElement && el.contains(block) ? block : null
+    }
+    const fromPoint =
+      Number.isFinite(e.clientX) && Number.isFinite(e.clientY) ? document.elementFromPoint(e.clientX, e.clientY) : null
+    const block = blockAt(fromPoint) ?? blockAt(e.target instanceof Element ? e.target : null)
+    if (!block) return
     const blocks = [...el.querySelectorAll<HTMLElement>(':scope > .top-level-block')]
     const blockIndex = blocks.indexOf(block)
     if (blockIndex === -1) return
@@ -585,6 +602,26 @@ function setupDrag(el: HTMLElement | null) {
     dragDropped = true
   }
   el.addEventListener('drop', recordDrop, { capture: true, signal })
+  // Synthetic drags (touch/pen) skip the library's `onDragstart`, so capture
+  // the source row on pointerdown and treat the pointerup as a drop. Native
+  // mouse drags overwrite this in `onDragstart` before any drop can land.
+  el.addEventListener(
+    'pointerdown',
+    e => {
+      const handle = e.target instanceof Element ? e.target.closest('.drag-handle') : null
+      const block = handle?.closest('.top-level-block')
+      if (!(block instanceof HTMLElement) || !el.contains(block)) return
+      const blocks = [...el.querySelectorAll<HTMLElement>(':scope > .top-level-block')]
+      const blockIndex = blocks.indexOf(block)
+      if (blockIndex === -1) return
+      keyboardLift.value = null
+      dragSourceIndex.value = blockIndex
+      synthDrag = true
+      dragDropped = false
+      dropPoint = null
+    },
+    { capture: true, signal },
+  )
   el.addEventListener(
     'pointerup',
     e => {
@@ -597,8 +634,8 @@ function setupDrag(el: HTMLElement | null) {
     values: dragValues,
     dragHandle: '.drag-handle',
     // Only actual rows are draggable nodes. The keyboard insertion line is
-    // also a direct child; 0.5.3's remapNodes counts every child, warns on
-    // the value mismatch, and skips the remap, leaving rows after the line
+    // also a direct child; 0.6.1's remapNodes counts every node child, warns
+    // on the value mismatch, and skips the remap, leaving rows after the line
     // mapped to the wrong value.
     draggable: child => child.classList.contains('top-level-block'),
     handleNodeFocus: (data, state) => {
