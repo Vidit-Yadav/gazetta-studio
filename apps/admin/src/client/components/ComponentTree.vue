@@ -56,6 +56,8 @@ const focus = useComponentFocusStore()
 const structural = useEditorStructuralStore()
 const selectedNodeKey = ref<string | null>(null)
 const keyboardLift = ref<{ from: number; to: number } | null>(null)
+const announcerText = ref('')
+const announcerVersion = ref(0)
 const hoveredNodeKey = ref<string | null>(null)
 const componentNodes = ref<ComponentNode[]>([])
 const showAddDialog = ref(false)
@@ -690,6 +692,16 @@ onBeforeUnmount(() => {
 })
 
 /**
+ * Set the tree's single polite live region. Re-keying the message span makes
+ * assistive tech re-announce a repeated message (for example, lifting the same
+ * row again after Escape) instead of treating the unchanged text as a no-op.
+ */
+function announce(message: string): void {
+  announcerText.value = message
+  announcerVersion.value++
+}
+
+/**
  * Keyboard shortcuts on a focused top-level row:
  *   - Space, ArrowUp/Down, Space — lift, move, drop (#105 Q6).
  *   - Escape — cancel a lifted row.
@@ -722,14 +734,19 @@ function onTopLevelKeydown(ev: KeyboardEvent, index: number): void {
     ev.preventDefault()
     if (keyboardLift.value && keyboardLift.value.from === index) {
       const { from, to } = keyboardLift.value
+      const total = topLevelNodes.value.length
       keyboardLift.value = null
       if (from !== to) {
         pendingFocusLabel.value = topLevelNodes.value[index]?.label ?? null
         moveComponentTo(from, to)
         void nextTick(() => handle.focus())
       }
+      announce(`Dropped at position ${to + 1} of ${total}`)
     } else {
       keyboardLift.value = { from: index, to: index }
+      announce(
+        `Picked up: ${topLevelNodes.value[index]?.label ?? ''}. Currently at position ${index + 1} of ${topLevelNodes.value.length}`,
+      )
     }
     return
   }
@@ -745,7 +762,10 @@ function onTopLevelKeydown(ev: KeyboardEvent, index: number): void {
       ev.preventDefault()
       const delta = ev.key === 'ArrowUp' ? -1 : 1
       const lastIndex = topLevelNodes.value.length - 1
-      keyboardLift.value.to = Math.max(0, Math.min(lastIndex, keyboardLift.value.to + delta))
+      const next = Math.max(0, Math.min(lastIndex, keyboardLift.value.to + delta))
+      if (next === keyboardLift.value.to) return
+      keyboardLift.value.to = next
+      announce(`Moved to position ${next + 1} of ${topLevelNodes.value.length}`)
       return
     }
   }
@@ -887,6 +907,18 @@ function nextDuplicateName(
 
 <template>
   <div v-if="detail" class="component-tree">
+    <!-- One polite live region for the keyboard lift/move/drop path. The
+         keyed span re-announces repeated messages without changing the
+         announced text. Kept in the accessibility tree by the CSS below. -->
+    <div
+      class="component-tree-announcer"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      data-testid="component-tree-announcer">
+      <span :key="announcerVersion">{{ announcerText }}</span>
+    </div>
+
     <!-- Root row (the page or fragment itself). Rendered outside the
          draggable list so it isn't a drop target. -->
     <div v-if="rootNode"
@@ -998,6 +1030,21 @@ function nextDuplicateName(
 
 <style scoped>
 .component-tree { font-size: 13px; line-height: 22px; }
+/* Visually hidden but still exposed to assistive technology. No display:none,
+   visibility:hidden or [hidden] — those remove the live region from the
+   accessibility tree. */
+.component-tree-announcer {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
 .empty { color: var(--color-muted); }
 .node-item { display: flex; align-items: center; gap: 4px; height: 22px; padding: 0 6px; margin: 0 2px; cursor: pointer; border-radius: 3px; }
 .node-item:hover, .node-item.hovered { background: var(--color-hover-bg); }

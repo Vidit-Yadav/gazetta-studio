@@ -62,8 +62,9 @@ const testRouter = createRouter({
   ],
 })
 
-function mountTree(fragmentsApi: FragmentsApi) {
+function mountTree(fragmentsApi: FragmentsApi, attachTo?: HTMLElement) {
   return mount(ComponentTree, {
+    ...(attachTo ? { attachTo } : {}),
     global: {
       plugins: [PrimeVue, testRouter],
       provide: { [FRAGMENTS_API as symbol]: fragmentsApi },
@@ -1132,5 +1133,277 @@ describe('ComponentTree — duplicate component (#45)', () => {
     const blocks = w.findAll('.top-level-block')
     await blocks[0].trigger('keydown', { key: 'd', metaKey: true, altKey: true })
     expect(addSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('ComponentTree - keyboard reorder announcements (#1161)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  function selectStarterHome() {
+    setPageSelection({
+      name: 'home',
+      route: '/',
+      template: 'page-default',
+      dir: 'pages/home',
+      components: [
+        { name: 'hero', template: 'hero', content: { title: 'A' } },
+        { name: 'features', template: 'features', content: {} },
+        { name: 'banner', template: 'banner', content: {} },
+      ],
+    })
+  }
+
+  function announcer(w: ReturnType<typeof mountTree>) {
+    return w.find('[data-testid="component-tree-announcer"]')
+  }
+
+  function pendingNames(): string[] {
+    const pending = useEditorStructuralStore().pendingFor({ kind: 'page', name: 'home' })
+    return (pending ?? []).map(entry => (typeof entry === 'string' ? entry : entry.name))
+  }
+
+  it('renders exactly one polite, atomic live region that assistive tech can reach', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+
+    const regions = w.findAll('[data-testid="component-tree-announcer"]')
+    expect(regions).toHaveLength(1)
+    const region = regions[0]!
+    expect(region.attributes('aria-live')).toBe('polite')
+    expect(region.attributes('aria-atomic')).toBe('true')
+    expect(region.attributes('hidden')).toBeUndefined()
+    expect(region.attributes('aria-hidden')).toBeUndefined()
+    expect(region.text()).toBe('')
+    expect(w.findAll('[aria-live]')).toHaveLength(1)
+    expect(region.classes()).toContain('component-tree-announcer')
+  })
+
+  it('announces a lifted first row with its label and 1-based position', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+
+    await w.find('[data-testid="drag-handle-hero"]').trigger('keydown', { key: ' ' })
+
+    expect(announcer(w).text()).toBe('Picked up: hero. Currently at position 1 of 3')
+  })
+
+  it('announces a lifted last row with its label and 1-based position', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+
+    await w.find('[data-testid="drag-handle-banner"]').trigger('keydown', { key: ' ' })
+
+    expect(announcer(w).text()).toBe('Picked up: banner. Currently at position 3 of 3')
+  })
+
+  it('uses the visible fragment reference label when the lifted row is a fragment', async () => {
+    setPageSelection({
+      name: 'home',
+      route: '/',
+      template: 'page-default',
+      dir: 'pages/home',
+      components: ['@header', { name: 'hero', template: 'hero', content: {} }],
+    })
+    const w = mountTree(
+      fakeFragmentsApi({
+        getFragment: async name => ({
+          name,
+          template: 'header-layout',
+          dir: `fragments/${name}`,
+          components: [],
+        }),
+      }),
+    )
+    await flushMicrotasks()
+
+    await w.find('[data-testid="drag-handle-@header"]').trigger('keydown', { key: ' ' })
+
+    expect(announcer(w).text()).toBe('Picked up: @header. Currently at position 1 of 2')
+  })
+
+  it('announces each arrow destination, matching the insertion indicator', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    const handle = w.find('[data-testid="drag-handle-hero"]')
+
+    await handle.trigger('keydown', { key: ' ' })
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    expect(announcer(w).text()).toBe('Moved to position 2 of 3')
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('2')
+
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    expect(announcer(w).text()).toBe('Moved to position 3 of 3')
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('3')
+
+    await handle.trigger('keydown', { key: 'ArrowUp' })
+    expect(announcer(w).text()).toBe('Moved to position 2 of 3')
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('2')
+
+    await handle.trigger('keydown', { key: 'ArrowUp' })
+    expect(announcer(w).text()).toBe('Moved to position 1 of 3')
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('0')
+  })
+
+  it('announces upward movement from the last row at the destination, not the source', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    const handle = w.find('[data-testid="drag-handle-banner"]')
+
+    await handle.trigger('keydown', { key: ' ' })
+    expect(announcer(w).text()).toBe('Picked up: banner. Currently at position 3 of 3')
+
+    await handle.trigger('keydown', { key: 'ArrowUp' })
+    expect(announcer(w).text()).toBe('Moved to position 2 of 3')
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('1')
+  })
+
+  it('leaves the announcement unchanged when an arrow cannot move past a boundary', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    const handle = w.find('[data-testid="drag-handle-hero"]')
+
+    await handle.trigger('keydown', { key: ' ' })
+    const pickedUp = 'Picked up: hero. Currently at position 1 of 3'
+    expect(announcer(w).text()).toBe(pickedUp)
+
+    await handle.trigger('keydown', { key: 'ArrowUp' })
+    expect(announcer(w).text()).toBe(pickedUp)
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('0')
+
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    expect(announcer(w).text()).toBe('Moved to position 3 of 3')
+
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    expect(announcer(w).text()).toBe('Moved to position 3 of 3')
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').attributes('data-boundary')).toBe('3')
+  })
+
+  it('announces the committed position on drop and commits the intended order', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    const handle = w.find('[data-testid="drag-handle-hero"]')
+
+    await handle.trigger('keydown', { key: ' ' })
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    await handle.trigger('keydown', { key: ' ' })
+
+    expect(announcer(w).text()).toBe('Dropped at position 2 of 3')
+    expect(pendingNames()).toEqual(['features', 'hero', 'banner'])
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(false)
+  })
+
+  it('announces dropping in place without a movement and commits no structural edit', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    const handle = w.find('[data-testid="drag-handle-features"]')
+
+    await handle.trigger('keydown', { key: ' ' })
+    expect(announcer(w).text()).toBe('Picked up: features. Currently at position 2 of 3')
+
+    await handle.trigger('keydown', { key: ' ' })
+    expect(announcer(w).text()).toBe('Dropped at position 2 of 3')
+    expect(pendingNames()).toEqual([])
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(false)
+  })
+
+  it('announces dropping at the bottom boundary and commits the final position', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    const handle = w.find('[data-testid="drag-handle-hero"]')
+
+    await handle.trigger('keydown', { key: ' ' })
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    await handle.trigger('keydown', { key: ' ' })
+
+    expect(announcer(w).text()).toBe('Dropped at position 3 of 3')
+    expect(pendingNames()).toEqual(['features', 'banner', 'hero'])
+  })
+
+  it('restores focus to the dropped row handle after the tree rebuilds', async () => {
+    selectStarterHome()
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const w = mountTree(fakeFragmentsApi(), host)
+    try {
+      await flushMicrotasks()
+      const handle = w.find('[data-testid="drag-handle-hero"]')
+
+      await handle.trigger('keydown', { key: ' ' })
+      await handle.trigger('keydown', { key: 'ArrowDown' })
+      await handle.trigger('keydown', { key: ' ' })
+      await flushMicrotasks()
+      await w.vm.$nextTick()
+
+      await vi.waitFor(() => {
+        expect(document.activeElement?.getAttribute('data-testid')).toBe('drag-handle-hero')
+      })
+    } finally {
+      w.unmount()
+      host.remove()
+    }
+  })
+
+  it('Escape cancels the lift without overwriting the last announcement', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    const editing = useEditingStore()
+    const moveSpy = vi.spyOn(editing, 'moveComponentStructural')
+    const handle = w.find('[data-testid="drag-handle-hero"]')
+
+    await handle.trigger('keydown', { key: ' ' })
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    expect(announcer(w).text()).toBe('Moved to position 2 of 3')
+
+    await handle.trigger('keydown', { key: 'Escape' })
+    expect(announcer(w).text()).toBe('Moved to position 2 of 3')
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(false)
+    expect(moveSpy).not.toHaveBeenCalled()
+  })
+
+  it('starting a mouse drag leaves the live-region text unchanged', async () => {
+    dragAndDropMock.mockClear()
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    const handle = w.find('[data-testid="drag-handle-hero"]')
+
+    await handle.trigger('keydown', { key: ' ' })
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    const before = announcer(w).text()
+    expect(before).toBe('Moved to position 2 of 3')
+
+    const dragOptions = dragAndDropMock.mock.calls[0][0] as { onDragstart: (data: unknown) => void }
+    dragOptions.onDragstart({ position: 0, state: {} })
+    await w.vm.$nextTick()
+
+    expect(announcer(w).text()).toBe(before)
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(false)
+  })
+
+  it('Alt+Arrow moves immediately without changing the live-region text', async () => {
+    selectStarterHome()
+    const w = mountTree(fakeFragmentsApi())
+    await flushMicrotasks()
+    expect(announcer(w).text()).toBe('')
+
+    await w.findAll('.top-level-block')[0]!.trigger('keydown', { key: 'ArrowDown', altKey: true })
+
+    expect(announcer(w).text()).toBe('')
+    expect(pendingNames()).toEqual(['features', 'hero', 'banner'])
+    expect(w.find('[data-testid="keyboard-insertion-indicator"]').exists()).toBe(false)
   })
 })

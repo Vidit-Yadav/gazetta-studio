@@ -99,7 +99,7 @@ The issue's "Scope" line lists these as CONSIDERATIONS, not v1 requirements.
 
 Two keyboard paths, both documented in the row's tooltip:
 
-1. **Space-to-lift** (app-implemented; the pinned FormKit 0.6.1 keyboard handler is empty) — focus the grip handle, press Space, use ArrowUp/ArrowDown to navigate, press Space again to drop. WAI-ARIA "grab and drop" pattern. Announcements are not part of this cut; a custom live region is the follow-up if we keep this path.
+1. **Space-to-lift** (app-implemented; the pinned FormKit 0.6.1 keyboard handler is empty) — focus the grip handle, press Space, use ArrowUp/ArrowDown to navigate, press Space again to drop. WAI-ARIA "grab and drop" pattern. One visually hidden polite live region announces pickup, each destination, and the drop (#1161); Escape, mouse drags and Alt+Arrow stay silent.
 
 2. **Alt+ArrowUp / Alt+ArrowDown** — focus any cell on the row, hold Alt, press ArrowUp or ArrowDown, the row moves one position immediately. Power-user one-keystroke shortcut. Custom layer on top of the library (~30 LOC — `@vueuse/core`'s `onKeyStroke` against the row).
 
@@ -128,7 +128,7 @@ Today's `addComponent` and `removeComponent` toast. `moveComponent` does not. Wi
 
 1. **Visual reflow** — the row physically moves to its new position; this IS the feedback.
 2. **Dirty dot** — already on the page node in the site tree; signals "pending save."
-3. **ARIA live-region announcement** — a follow-up; the pinned FormKit 0.6.1 build does not ship the keyboard handler or announcements the guide originally assumed.
+3. **ARIA live-region announcement** — the tree's polite region announces keyboard pickup, movement and drop (#1161).
 
 Existing `addComponent` / `removeComponent` toasts continue to fire — those change the SET, not just the order, and the toast is the persistence signal for them.
 
@@ -154,7 +154,7 @@ Visual budget: 5 elements (down from 6).
 
 - Drag handle is a `<button>` (focusable; tab-stop)
 - Pressing `Space` on the handle "lifts" the row
-- After lift, ArrowUp / ArrowDown moves the thin insertion line from Q4 to the proposed landing slot; the dragged row keeps focus and visual lift styling (live-region announcements are a follow-up)
+- After lift, ArrowUp / ArrowDown moves the thin insertion line from Q4 to the proposed landing slot; the dragged row keeps focus and visual lift styling, and the live region announces the pending destination
 - Pressing `Space` again drops; row stays focused at the new position
 - Pressing `Esc` cancels the lift (row returns to original position)
 
@@ -164,10 +164,12 @@ Library handles long-press to lift + finger-drag to move + release to drop. Auto
 
 ### Screen-reader announcements
 
-Not implemented in this cut. The pinned `@formkit/drag-and-drop` 0.6.1 build has no working keyboard handler and emits no live-region announcements, so `ComponentTree.vue` owns the Space/arrow behavior. Add a polite live region when keyboard accessibility is hardened:
+Implemented in #1161 as one visually hidden, polite live region in `ComponentTree.vue` (`data-testid="component-tree-announcer"`). Positions are 1-based top-level order, matching the insertion line and the committed result:
 - "Picked up: hero. Currently at position 1 of 4"
 - "Moved to position 2 of 4"
 - "Dropped at position 2 of 4"
+
+Escape, mouse drags and Alt+Arrow leave the region's text unchanged.
 
 ### Color and theming
 
